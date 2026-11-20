@@ -6,7 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import { isValidCpf, maskCpf, normalizeCpf } from '../common/cpf.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import {

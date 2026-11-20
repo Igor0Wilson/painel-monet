@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import { isValidCpf, normalizeCpf, normalizePhone } from '../common/cpf.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS, UserDoc } from '../firebase/firebase.types';

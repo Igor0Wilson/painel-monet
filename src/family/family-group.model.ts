@@ -12,7 +12,7 @@ import {
 } from 'sequelize-typescript';
 import { User } from '../users/user.model';
 import { FamilyMember } from './family-member.model';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 
 @Table({ tableName: 'family_groups', timestamps: true, underscored: true })
 export class FamilyGroup extends Model {

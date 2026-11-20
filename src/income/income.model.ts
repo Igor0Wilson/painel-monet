@@ -10,7 +10,7 @@ import {
   BeforeCreate,
 } from 'sequelize-typescript';
 import { User } from '../users/user.model';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 
 @Table({ tableName: 'income', timestamps: true, underscored: true })
 export class Income extends Model {

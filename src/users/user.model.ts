@@ -12,7 +12,7 @@ import {
 import { AccountType } from '../account-types/account-type.model';
 import { Expense } from '../expenses/expense.model';
 import { Income } from '../income/income.model';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 
 @Table({ tableName: 'users', timestamps: true, underscored: true })
 export class User extends Model {

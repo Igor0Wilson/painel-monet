@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS, IncomeDoc } from '../firebase/firebase.types';

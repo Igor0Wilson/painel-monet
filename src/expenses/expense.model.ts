@@ -11,7 +11,7 @@ import {
 } from 'sequelize-typescript';
 import { User } from '../users/user.model';
 import { AccountType } from '../account-types/account-type.model';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 
 @Table({ tableName: 'expenses', timestamps: true, underscored: true })
 export class Expense extends Model {
