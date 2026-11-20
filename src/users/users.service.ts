@@ -5,12 +5,20 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { randomUUID as uuidv4 } from 'crypto';
+import { randomBytes, randomUUID as uuidv4 } from 'crypto';
 import { isValidCpf, normalizeCpf, normalizePhone } from '../common/cpf.utils';
 import { FirebaseService } from '../firebase/firebase.service';
-import { COLLECTIONS, UserDoc } from '../firebase/firebase.types';
+import { COLLECTIONS, FamilyMemberDoc, UserDoc } from '../firebase/firebase.types';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+
+export interface CompleteGoogleUserParams {
+  email: string;
+  googleUid: string;
+  name: string;
+  cpf: string;
+  phone: string;
+}
 
 @Injectable()
 export class UsersService {
@@ -24,7 +32,10 @@ export class UsersService {
       normalizedEmail,
     );
     if (existing) {
-      throw new ConflictException('Não foi possível concluir o cadastro');
+      throw new ConflictException({
+        message: 'Este e-mail já está cadastrado em outra conta.',
+        code: 'EMAIL_ALREADY_EXISTS',
+      });
     }
 
     let normalizedCpf: string | null = null;
@@ -39,9 +50,10 @@ export class UsersService {
         normalizedCpf,
       );
       if (existingCpf) {
-        throw new ConflictException(
-          'Não foi possível concluir o cadastro com este CPF',
-        );
+        throw new ConflictException({
+          message: 'Este CPF já está cadastrado em outra conta.',
+          code: 'CPF_ALREADY_EXISTS',
+        });
       }
     }
 
@@ -59,13 +71,102 @@ export class UsersService {
       password: hashed,
       cpf: normalizedCpf,
       phone: normalizedPhone,
+      googleUid: null,
+      authProvider: 'local',
       emergencyFund: 0,
       investments: 0,
       createdAt: now,
       updatedAt: now,
     };
 
-    return this.firebase.setDoc(COLLECTIONS.USERS, user);
+    return this.firebase.createUserWithAtomicLocks(user);
+  }
+
+  async createOrCompleteGoogleUser(
+    params: CompleteGoogleUserParams,
+  ): Promise<UserDoc> {
+    const normalizedEmail = params.email.trim().toLowerCase();
+    const trimmedName = params.name.trim();
+    if (trimmedName.length < 2) {
+      throw new BadRequestException('Informe seu nome completo.');
+    }
+
+    const normalizedCpf = normalizeCpf(params.cpf);
+    if (!isValidCpf(normalizedCpf)) {
+      throw new BadRequestException('CPF inválido. Verifique os 11 dígitos.');
+    }
+
+    const normalizedPhone = normalizePhone(params.phone);
+    if (normalizedPhone.length < 10) {
+      throw new BadRequestException(
+        'Telefone inválido. Informe DDD + número.',
+      );
+    }
+
+    const existingByEmail = await this.findByEmail(normalizedEmail);
+    const existingByCpf = await this.findByCpf(normalizedCpf);
+
+    if (
+      existingByCpf &&
+      (!existingByEmail || existingByCpf.id !== existingByEmail.id)
+    ) {
+      throw new ConflictException({
+        message: 'Este CPF já está cadastrado em outra conta.',
+        code: 'CPF_ALREADY_EXISTS',
+      });
+    }
+
+    const now = new Date().toISOString();
+
+    if (existingByEmail) {
+      return this.firebase.updateUserWithAtomicLocks(
+        existingByEmail.id,
+        existingByEmail,
+        {
+          name: trimmedName,
+          cpf: normalizedCpf,
+          phone: normalizedPhone,
+          googleUid: params.googleUid,
+          authProvider: existingByEmail.authProvider || 'google',
+          updatedAt: now,
+        },
+      );
+    }
+
+    const randomPassword = randomBytes(32).toString('hex');
+    const hashedPassword = await bcrypt.hash(randomPassword, 12);
+
+    const user: UserDoc = {
+      id: uuidv4(),
+      name: trimmedName,
+      email: normalizedEmail,
+      password: hashedPassword,
+      cpf: normalizedCpf,
+      phone: normalizedPhone,
+      googleUid: params.googleUid,
+      authProvider: 'google',
+      emergencyFund: 0,
+      investments: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    return this.firebase.createUserWithAtomicLocks(user);
+  }
+
+  async linkGoogleUid(userId: string, googleUid: string): Promise<void> {
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      googleUid,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  async updatePassword(userId: string, newPassword: string): Promise<void> {
+    const hashed = await bcrypt.hash(newPassword, 12);
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      password: hashed,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async findByEmail(email: string): Promise<UserDoc | null> {
@@ -99,7 +200,10 @@ export class UsersService {
       if (normalizedEmail !== user.email) {
         const existing = await this.findByEmail(normalizedEmail);
         if (existing) {
-          throw new ConflictException('Não foi possível atualizar o e-mail');
+          throw new ConflictException({
+            message: 'Este e-mail já está vinculado a outra conta.',
+            code: 'EMAIL_ALREADY_EXISTS',
+          });
         }
       }
       updateData.email = normalizedEmail;
@@ -115,27 +219,40 @@ export class UsersService {
 
     if (dto.cpf !== undefined) {
       const trimmedCpf = dto.cpf.trim();
-      if (!trimmedCpf) {
-        updateData.cpf = null;
-      } else {
-        const normalized = normalizeCpf(trimmedCpf);
-        if (!isValidCpf(normalized)) {
-          throw new BadRequestException('CPF inválido. Verifique os 11 dígitos.');
+      const nextCpf = trimmedCpf ? normalizeCpf(trimmedCpf) : null;
+
+      if (nextCpf && !isValidCpf(nextCpf)) {
+        throw new BadRequestException('CPF inválido. Verifique os 11 dígitos.');
+      }
+
+      if (nextCpf !== user.cpf) {
+        const membership = await this.firebase.findOneByField<FamilyMemberDoc>(
+          COLLECTIONS.FAMILY_MEMBERS,
+          'userId',
+          user.id,
+        );
+        if (membership) {
+          throw new BadRequestException(
+            'Saia do Modo Família antes de alterar ou remover seu CPF.',
+          );
         }
-        if (normalized !== user.cpf) {
+
+        if (nextCpf) {
           const existingCpf = await this.firebase.findOneByField<UserDoc>(
             COLLECTIONS.USERS,
             'cpf',
-            normalized,
+            nextCpf,
           );
           if (existingCpf && existingCpf.id !== user.id) {
-            throw new ConflictException(
-              'Este CPF já está vinculado a outra conta',
-            );
+            throw new ConflictException({
+              message: 'Este CPF já está cadastrado em outra conta.',
+              code: 'CPF_ALREADY_EXISTS',
+            });
           }
         }
-        updateData.cpf = normalized;
       }
+
+      updateData.cpf = nextCpf;
     }
 
     if (dto.phone !== undefined) {
@@ -143,7 +260,6 @@ export class UsersService {
       updateData.phone = normalizedPhone || null;
     }
 
-    await this.firebase.updateDoc(COLLECTIONS.USERS, user.id, updateData);
-    return { ...user, ...updateData };
+    return this.firebase.updateUserWithAtomicLocks(user.id, user, updateData);
   }
 }

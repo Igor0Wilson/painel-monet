@@ -5,10 +5,23 @@ export interface UserDoc {
   password: string;
   cpf: string | null;
   phone: string | null;
+  googleUid?: string | null;
+  authProvider?: 'local' | 'google';
   emergencyFund: number;
   investments: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PasswordResetDoc {
+  id: string;
+  userId: string;
+  email: string;
+  codeHash: string;
+  attempts: number;
+  used: boolean;
+  expiresAt: string;
+  createdAt: string;
 }
 
 export interface AccountTypeDoc {
@@ -81,6 +94,9 @@ export interface FamilyInviteDoc {
 
 export const COLLECTIONS = {
   USERS: 'users',
+  CPF_LOCKS: 'cpf_locks',
+  EMAIL_LOCKS: 'email_locks',
+  PASSWORD_RESETS: 'password_resets',
   ACCOUNT_TYPES: 'account_types',
   EXPENSES: 'expenses',
   INCOME: 'income',
