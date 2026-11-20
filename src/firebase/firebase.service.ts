@@ -1,7 +1,13 @@
-import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { createHash, createVerify } from 'crypto';
 import {
   cert,
+  Credential,
   getApps,
   initializeApp,
   ServiceAccount,
@@ -15,11 +21,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { COLLECTIONS, UserDoc } from './firebase.types';
 
-export interface VerifiedGoogleToken {
+export interface VerifiedFirebaseToken {
   uid: string;
   email: string;
   email_verified: boolean;
   name?: string;
+  signInProvider: string;
+  authTime: number;
+}
+
+export interface FirebaseAuthAccountInfo {
+  localId: string;
+  email?: string;
+  displayName?: string;
+  passwordUpdatedAt?: number;
+  disabled?: boolean;
+  providerUserInfo?: Array<{ providerId?: string }>;
 }
 
 const GOOGLE_CERTS_URL =
@@ -29,8 +46,13 @@ const GOOGLE_CERTS_URL =
 export class FirebaseService implements OnModuleInit {
   private readonly logger = new Logger(FirebaseService.name);
   private firestoreInstance: Firestore | null = null;
+  private credentialInstance: Credential | null = null;
   private resolvedProjectId = 'painel-monet';
-  private cachedCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
+  private cachedCerts: {
+    certs: Record<string, string>;
+    expiresAt: number;
+  } | null = null;
+  private cachedAdminToken: { token: string; expiresAt: number } | null = null;
 
   onModuleInit(): void {
     this.ensureInitialized();
@@ -44,7 +66,9 @@ export class FirebaseService implements OnModuleInit {
         : Buffer.from(jsonEnv, 'base64').toString('utf8');
       const parsed = JSON.parse(rawJson);
       if (parsed.private_key) {
-        parsed.private_key = String(parsed.private_key).replace(/\\n/g, '\n');
+        parsed.private_key = String(parsed.private_key)
+          .replace(/\r\n/g, '\n')
+          .replace(/\\n/g, '\n');
       }
       return parsed;
     }
@@ -61,7 +85,9 @@ export class FirebaseService implements OnModuleInit {
       }
       const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
       if (parsed.private_key) {
-        parsed.private_key = String(parsed.private_key).replace(/\\n/g, '\n');
+        parsed.private_key = String(parsed.private_key)
+          .replace(/\r\n/g, '\n')
+          .replace(/\\n/g, '\n');
       }
       return parsed;
     }
@@ -118,19 +144,21 @@ export class FirebaseService implements OnModuleInit {
       return this.firestoreInstance;
     }
 
+    const serviceAccount = this.loadServiceAccount();
+    this.credentialInstance = cert(serviceAccount);
+    this.resolvedProjectId =
+      process.env.FIREBASE_PROJECT_ID?.trim() ||
+      serviceAccount.projectId ||
+      (serviceAccount as any).project_id ||
+      'painel-monet';
+
     if (getApps().length === 0) {
-      const serviceAccount = this.loadServiceAccount();
-      const resolvedProjectId =
-        process.env.FIREBASE_PROJECT_ID?.trim() ||
-        serviceAccount.projectId ||
-        'painel-monet';
-      this.resolvedProjectId = resolvedProjectId;
       initializeApp({
-        credential: cert(serviceAccount),
-        projectId: resolvedProjectId,
+        credential: this.credentialInstance,
+        projectId: this.resolvedProjectId,
       });
       this.logger.log(
-        `Firebase Admin inicializado para o projeto: ${resolvedProjectId}`,
+        `Firebase Admin inicializado para o projeto: ${this.resolvedProjectId}`,
       );
     }
 
@@ -236,7 +264,9 @@ export class FirebaseService implements OnModuleInit {
 
     const response = await fetch(GOOGLE_CERTS_URL);
     if (!response.ok) {
-      throw new Error(`Falha ao buscar certificados públicos do Google (${response.status})`);
+      throw new Error(
+        `Falha ao buscar certificados públicos do Google (${response.status})`,
+      );
     }
 
     const certs = (await response.json()) as Record<string, string>;
@@ -251,7 +281,28 @@ export class FirebaseService implements OnModuleInit {
     return certs;
   }
 
-  async verifyGoogleIdToken(idToken: string): Promise<VerifiedGoogleToken> {
+  private async getAdminAccessToken(): Promise<string> {
+    this.ensureInitialized();
+    if (
+      this.cachedAdminToken &&
+      this.cachedAdminToken.expiresAt > Date.now() + 60000
+    ) {
+      return this.cachedAdminToken.token;
+    }
+
+    if (!this.credentialInstance) {
+      throw new Error('Credencial do Firebase Admin não inicializada.');
+    }
+
+    const accessToken = await this.credentialInstance.getAccessToken();
+    this.cachedAdminToken = {
+      token: accessToken.access_token,
+      expiresAt: Date.now() + (accessToken.expires_in || 3600) * 1000,
+    };
+    return accessToken.access_token;
+  }
+
+  async verifyFirebaseIdToken(idToken: string): Promise<VerifiedFirebaseToken> {
     this.ensureInitialized();
     const parts = idToken.split('.');
     if (parts.length !== 3) {
@@ -281,7 +332,7 @@ export class FirebaseService implements OnModuleInit {
       'base64',
     );
     if (!verifier.verify(publicCert, sigBuffer)) {
-      throw new Error('Assinatura do token Google inválida');
+      throw new Error('Assinatura do token Firebase inválida');
     }
 
     const payload = this.decodeBase64UrlJson<{
@@ -290,9 +341,11 @@ export class FirebaseService implements OnModuleInit {
       sub?: string;
       exp?: number;
       iat?: number;
+      auth_time?: number;
       email?: string;
       email_verified?: boolean;
       name?: string;
+      firebase?: { sign_in_provider?: string };
     }>(encodedPayload);
 
     const projectId =
@@ -309,10 +362,10 @@ export class FirebaseService implements OnModuleInit {
       throw new Error('Identificador de usuário ausente no token');
     }
     if (!payload.exp || payload.exp <= nowSec) {
-      throw new Error('Token Google expirado');
+      throw new Error('Token Firebase expirado');
     }
     if (payload.iat && payload.iat > nowSec + 300) {
-      throw new Error('Token Google com data de emissão futura inválida');
+      throw new Error('Token Firebase com data de emissão futura inválida');
     }
 
     return {
@@ -320,7 +373,149 @@ export class FirebaseService implements OnModuleInit {
       email: payload.email || '',
       email_verified: Boolean(payload.email_verified),
       name: payload.name,
+      signInProvider: payload.firebase?.sign_in_provider || 'password',
+      authTime: payload.auth_time || payload.iat || nowSec,
     };
+  }
+
+  async lookupFirebaseUser(params: {
+    uid?: string;
+    email?: string;
+  }): Promise<FirebaseAuthAccountInfo | null> {
+    const token = await this.getAdminAccessToken();
+    const body: Record<string, string[]> = {};
+    if (params.uid) body.localId = [params.uid];
+    else if (params.email) body.email = [params.email.trim().toLowerCase()];
+    else return null;
+
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${this.resolvedProjectId}/accounts:lookup`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `Falha ao consultar conta no Firebase Auth (${response.status}): ${errText}`,
+      );
+    }
+
+    const data = (await response.json()) as {
+      users?: FirebaseAuthAccountInfo[];
+    };
+    return data.users?.[0] || null;
+  }
+
+  async updateFirebaseUser(
+    uid: string,
+    updates: {
+      password?: string;
+      email?: string;
+      displayName?: string;
+      validSince?: number;
+    },
+  ): Promise<void> {
+    const token = await this.getAdminAccessToken();
+    const body: Record<string, any> = { localId: uid };
+    if (updates.password !== undefined) body.password = updates.password;
+    if (updates.email !== undefined) body.email = updates.email;
+    if (updates.displayName !== undefined) {
+      body.displayName = updates.displayName;
+    }
+    if (updates.validSince !== undefined) {
+      body.validSince = String(updates.validSince);
+    }
+
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${this.resolvedProjectId}/accounts:update`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `Falha ao atualizar conta no Firebase Auth (${response.status}): ${errText}`,
+      );
+    }
+  }
+
+  async deleteFirebaseUser(uid: string): Promise<void> {
+    if (!uid) return;
+    const token = await this.getAdminAccessToken();
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${this.resolvedProjectId}/accounts:delete`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ localId: uid }),
+      },
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      if (errText.includes('USER_NOT_FOUND')) {
+        return;
+      }
+      throw new Error(
+        `Falha ao excluir conta no Firebase Auth (${response.status}): ${errText}`,
+      );
+    }
+  }
+
+  async sendFirebasePasswordResetEmail(
+    email: string,
+    continueUrl?: string,
+  ): Promise<void> {
+    const webApiKey = process.env.FIREBASE_WEB_API_KEY?.trim();
+    if (!webApiKey) {
+      throw new Error(
+        'FIREBASE_WEB_API_KEY não configurada no backend para envio de e-mail pelo Firebase.',
+      );
+    }
+
+    const payload: Record<string, string> = {
+      requestType: 'PASSWORD_RESET',
+      email: email.trim().toLowerCase(),
+    };
+    if (continueUrl) {
+      payload.continueUrl = continueUrl;
+    }
+
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${encodeURIComponent(webApiKey)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Firebase-Locale': 'pt-BR',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `Falha ao disparar e-mail de redefinição pelo Firebase (${response.status}): ${errText}`,
+      );
+    }
   }
 
   async createUserWithAtomicLocks(user: UserDoc): Promise<UserDoc> {
@@ -434,6 +629,25 @@ export class FirebaseService implements OnModuleInit {
     });
 
     return { ...currentUser, ...updateData };
+  }
+
+  async deleteUserAndLocks(user: UserDoc): Promise<void> {
+    const db = this.db;
+    const userRef = db.collection(COLLECTIONS.USERS).doc(user.id);
+    const emailLockRef = db
+      .collection(COLLECTIONS.EMAIL_LOCKS)
+      .doc(this.lockKey(user.email));
+    const cpfLockRef = user.cpf
+      ? db.collection(COLLECTIONS.CPF_LOCKS).doc(this.lockKey(user.cpf))
+      : null;
+
+    await db.runTransaction(async (tx) => {
+      tx.delete(userRef);
+      tx.delete(emailLockRef);
+      if (cpfLockRef) {
+        tx.delete(cpfLockRef);
+      }
+    });
   }
 
   async healthCheck(): Promise<boolean> {

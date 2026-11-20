@@ -7,7 +7,7 @@ import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.m
 import { COLLECTIONS } from '../firebase/firebase.types';
 import { UsersService } from './users.service';
 
-describe('UsersService (Firestore)', () => {
+describe('UsersService (Firebase Auth + Firestore)', () => {
   let firebase: InMemoryFirebaseService;
   let service: UsersService;
 
@@ -16,43 +16,22 @@ describe('UsersService (Firestore)', () => {
     service = new UsersService(firebase as any);
   });
 
-  it('rejects duplicate email on create', async () => {
-    await firebase.setDoc(COLLECTIONS.USERS, {
-      id: 'u-1',
-      name: 'Igor',
-      email: 'igor@test.com',
-      password: 'hash',
-      cpf: null,
-      phone: null,
-      emergencyFund: 0,
-      investments: 0,
-      createdAt: '',
-      updatedAt: '',
-    });
-
-    await expect(
-      service.create({
-        name: 'Igor',
-        email: 'igor@test.com',
-        password: 'Password123',
-      }),
-    ).rejects.toThrow(ConflictException);
-  });
-
   it('rejects duplicate CPF atomically with CPF_ALREADY_EXISTS code', async () => {
-    await service.create({
+    await service.createFromFirebase({
+      email: 'um@gmail.com',
+      firebaseUid: 'fb-1',
+      authProvider: 'password',
       name: 'Usuario Um',
-      email: 'um@test.com',
-      password: 'Password123',
       cpf: '52998224725',
       phone: '11999998888',
     });
 
     try {
-      await service.create({
+      await service.createFromFirebase({
+        email: 'dois@gmail.com',
+        firebaseUid: 'fb-2',
+        authProvider: 'password',
         name: 'Usuario Dois',
-        email: 'dois@test.com',
-        password: 'Password123',
         cpf: '529.982.247-25',
         phone: '11988887777',
       });
@@ -66,11 +45,13 @@ describe('UsersService (Firestore)', () => {
 
   it('rejects invalid CPF on create', async () => {
     await expect(
-      service.create({
-        name: 'Igor',
+      service.createFromFirebase({
         email: 'igor@test.com',
-        password: 'Password123',
+        firebaseUid: 'fb-3',
+        authProvider: 'password',
+        name: 'Igor',
         cpf: '111.111.111-11',
+        phone: '11999998888',
       }),
     ).rejects.toThrow(BadRequestException);
   });
@@ -82,70 +63,103 @@ describe('UsersService (Firestore)', () => {
   });
 
   it('blocks CPF changes while user belongs to a family group', async () => {
-    await firebase.setDoc(COLLECTIONS.USERS, {
-      id: 'u-1',
-      name: 'Igor',
+    const user = await service.createFromFirebase({
       email: 'igor@test.com',
-      password: 'hash',
+      firebaseUid: 'fb-4',
+      authProvider: 'password',
+      name: 'Igor',
       cpf: '52998224725',
       phone: '11988887777',
-      emergencyFund: 0,
-      investments: 0,
-      createdAt: '',
-      updatedAt: '',
     });
     await firebase.setDoc(COLLECTIONS.FAMILY_MEMBERS, {
       id: 'fm-1',
       familyGroupId: 'fg-1',
-      userId: 'u-1',
+      userId: user.id,
       userCpf: '52998224725',
       role: 'owner',
       createdAt: '',
       updatedAt: '',
     });
 
+    await expect(service.updateProfile(user.id, { cpf: '' })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('exports full user data backup cleanly', async () => {
+    const user = await service.createFromFirebase({
+      email: 'backup@gmail.com',
+      firebaseUid: 'fb-5',
+      authProvider: 'google',
+      name: 'Maria',
+      cpf: '52998224725',
+      phone: '11988887777',
+    });
+    await firebase.setDoc(COLLECTIONS.EXPENSES, {
+      id: 'exp-1',
+      userId: user.id,
+      name: 'Aluguel',
+      value: 1500,
+    });
+
+    const exported = await service.exportAccountData(user.id);
+    expect(exported.profile.email).toBe('backup@gmail.com');
+    expect(exported.summary.totalExpenses).toBe(1);
+    expect(exported.expenses).toHaveLength(1);
+  });
+
+  it('deactivates account and scrambles Firebase password', async () => {
+    const user = await service.createFromFirebase({
+      email: 'desativar@gmail.com',
+      firebaseUid: 'fb-6',
+      authProvider: 'password',
+      name: 'Lucas',
+      cpf: '52998224725',
+      phone: '11988887777',
+    });
+
+    await service.deactivateAccount(user.id, true);
+
+    const updated = await service.findById(user.id);
+    expect(updated?.isActive).toBe(false);
+    expect(updated?.deactivatedAtMs).toBeGreaterThan(0);
+    expect(firebase.firebaseAccounts.get('fb-6')?.passwordUpdatedAt).toBeTruthy();
+  });
+
+  it('permanently deletes Firestore data, locks and Firebase Auth user', async () => {
+    const user = await service.createFromFirebase({
+      email: 'excluir@gmail.com',
+      firebaseUid: 'fb-7',
+      authProvider: 'password',
+      name: 'Ana',
+      cpf: '52998224725',
+      phone: '11988887777',
+    });
+    await firebase.setDoc(COLLECTIONS.INCOME, {
+      id: 'inc-1',
+      userId: user.id,
+      name: 'Salario',
+      value: 5000,
+    });
+
     await expect(
-      service.updateProfile('u-1', { cpf: '' }),
+      service.deleteAccountPermanently(user.id, true, 'ERRADO'),
     ).rejects.toThrow(BadRequestException);
-  });
 
-  it('normalizes phone and updates allowed profile fields cleanly', async () => {
-    await firebase.setDoc(COLLECTIONS.USERS, {
-      id: 'u-1',
-      name: 'Igor',
-      email: 'igor@test.com',
-      password: 'hash',
-      cpf: null,
-      phone: null,
-      emergencyFund: 0,
-      investments: 0,
-      createdAt: '',
-      updatedAt: '',
+    await service.deleteAccountPermanently(user.id, true, 'EXCLUIR');
+
+    expect(await service.findById(user.id)).toBeNull();
+    expect(await firebase.findById(COLLECTIONS.INCOME, 'inc-1')).toBeNull();
+    expect(firebase.deletedFirebaseUids).toContain('fb-7');
+
+    const recreated = await service.createFromFirebase({
+      email: 'excluir@gmail.com',
+      firebaseUid: 'fb-8',
+      authProvider: 'password',
+      name: 'Ana Nova',
+      cpf: '52998224725',
+      phone: '11988887777',
     });
-
-    const updated = await service.updateProfile('u-1', {
-      name: '  Igor Silva  ',
-      phone: '(11) 98888-7777',
-    });
-
-    expect(updated.name).toBe('Igor Silva');
-    expect(updated.phone).toBe('11988887777');
-    const persisted = await firebase.findById<any>(COLLECTIONS.USERS, 'u-1');
-    expect(persisted.phone).toBe('11988887777');
-  });
-
-  it('creates Google user with mandatory name, CPF and phone', async () => {
-    const created = await service.createOrCompleteGoogleUser({
-      email: 'maria@gmail.com',
-      googleUid: 'google-uid-1',
-      name: 'Maria Silva',
-      cpf: '529.982.247-25',
-      phone: '(11) 97777-6666',
-    });
-
-    expect(created.email).toBe('maria@gmail.com');
-    expect(created.cpf).toBe('52998224725');
-    expect(created.phone).toBe('11977776666');
-    expect(created.authProvider).toBe('google');
+    expect(recreated.cpf).toBe('52998224725');
   });
 });

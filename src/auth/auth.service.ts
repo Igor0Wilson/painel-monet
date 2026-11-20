@@ -1,32 +1,21 @@
 import {
-  BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
-import {
-  createHash,
-  randomInt,
-  randomUUID as uuidv4,
-  timingSafeEqual,
-} from 'crypto';
 import { normalizeCpf } from '../common/cpf.utils';
 import { FirebaseService } from '../firebase/firebase.service';
-import {
-  COLLECTIONS,
-  PasswordResetDoc,
-  UserDoc,
-} from '../firebase/firebase.types';
+import { UserDoc } from '../firebase/firebase.types';
 import { UsersService } from '../users/users.service';
+import { FirebaseRegisterDto } from './dto/firebase-register.dto';
 import { GoogleCompleteDto } from './dto/google-complete.dto';
-import { ResetPasswordDto } from './dto/reset-password.dto';
 
 interface GoogleCompletionPayload {
   purpose: string;
   email: string;
-  googleUid: string;
+  firebaseUid: string;
   name?: string;
 }
 
@@ -61,10 +50,6 @@ export class AuthService {
     return `${visible}***@${domain}`;
   }
 
-  private hashCode(code: string): string {
-    return createHash('sha256').update(code.trim()).digest('hex');
-  }
-
   private async findUserByIdentifier(identifier: string): Promise<UserDoc | null> {
     const trimmed = identifier.trim();
     if (!trimmed) return null;
@@ -78,110 +63,174 @@ export class AuthService {
     return null;
   }
 
-  private async sendRecoveryEmail(
-    toEmail: string,
-    userName: string,
-    code: string,
-  ): Promise<boolean> {
-    const resendApiKey = process.env.RESEND_API_KEY?.trim();
-    const mailFrom =
-      process.env.MAIL_FROM?.trim() || 'Painel Monet <onboarding@resend.dev>';
-
-    if (!resendApiKey) {
-      this.logger.warn(
-        'RESEND_API_KEY não configurada — e-mail de recuperação não enviado externamente.',
-      );
-      return false;
-    }
-
-    const safeName = userName.replace(/[<>&"']/g, '');
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: mailFrom,
-        to: [toEmail],
-        subject: 'Código de recuperação de senha — Painel Monet',
-        html: `<p>Olá, ${safeName}.</p><p>Seu código de recuperação de senha é: <strong>${code}</strong></p><p>Este código expira em 15 minutos. Se você não solicitou, ignore este e-mail.</p>`,
-      }),
-    });
-
-    if (!response.ok) {
-      this.logger.error(
-        `Falha ao enviar e-mail de recuperação via Resend (HTTP ${response.status})`,
-      );
-      return false;
-    }
-
-    return true;
+  private getFrontendContinueUrl(mode: 'reset' | 'reactivate'): string | undefined {
+    const firstOrigin = (process.env.FRONTEND_URL || '')
+      .split(',')
+      .map((item) => item.trim().replace(/\/+$/, ''))
+      .find(Boolean);
+    if (!firstOrigin) return undefined;
+    return mode === 'reactivate'
+      ? `${firstOrigin}/login?reactivated=1`
+      : `${firstOrigin}/login?passwordReset=1`;
   }
 
-  async login(email: string, password: string) {
-    const user = await this.usersService.findByEmail(email);
-    if (!user) {
-      throw new UnauthorizedException('Credenciais inválidas');
-    }
-
-    const senhaValida = await bcrypt.compare(password, user.password);
-    if (!senhaValida) {
-      throw new UnauthorizedException('Credenciais inválidas');
-    }
-
-    return this.buildAuthResponse(user);
-  }
-
-  async loginWithGoogle(idToken: string) {
+  async loginWithFirebase(idToken: string) {
     let decoded;
     try {
-      decoded = await this.firebase.verifyGoogleIdToken(idToken);
+      decoded = await this.firebase.verifyFirebaseIdToken(idToken);
     } catch (error) {
       this.logger.warn(
-        `Falha ao validar token Google: ${error instanceof Error ? error.message : String(error)}`,
+        `Falha ao validar token Firebase: ${error instanceof Error ? error.message : String(error)}`,
       );
-      throw new UnauthorizedException('Token do Google inválido ou expirado.');
+      throw new UnauthorizedException(
+        'Sessão do Firebase inválida ou expirada. Faça login novamente.',
+      );
     }
 
     const email = decoded.email?.trim().toLowerCase();
-    if (!email || !decoded.email_verified) {
+    if (!email) {
+      throw new UnauthorizedException(
+        'A conta selecionada não possui um e-mail válido.',
+      );
+    }
+
+    const isGoogle = decoded.signInProvider === 'google.com';
+    if (isGoogle && !decoded.email_verified) {
       throw new UnauthorizedException(
         'A conta Google precisa possuir um e-mail verificado.',
       );
     }
 
-    const existing = await this.usersService.findByEmail(email);
-    if (existing && existing.name?.trim() && existing.cpf && existing.phone) {
-      if (!existing.googleUid) {
-        await this.usersService.linkGoogleUid(existing.id, decoded.uid);
+    const existing =
+      (await this.usersService.findByFirebaseUid(decoded.uid)) ||
+      (await this.usersService.findByEmail(email));
+
+    if (!existing) {
+      if (isGoogle) {
+        const completionToken = this.jwtService.sign(
+          {
+            purpose: 'google_profile_completion',
+            email,
+            firebaseUid: decoded.uid,
+            name: decoded.name || '',
+          },
+          { expiresIn: '15m' },
+        );
+
+        return {
+          requiresProfileCompletion: true,
+          completionToken,
+          googleProfile: {
+            email,
+            name: decoded.name || '',
+            cpf: '',
+            phone: '',
+          },
+        };
       }
+
+      throw new UnauthorizedException(
+        'Conta não encontrada no banco de dados do Painel Monet. Realize seu cadastro primeiro.',
+      );
+    }
+
+    let reactivated = false;
+    if (existing.isActive === false) {
+      const fbAccount = await this.firebase.lookupFirebaseUser({
+        uid: decoded.uid,
+      });
+      const passwordUpdatedAt = Number(fbAccount?.passwordUpdatedAt || 0);
+      const requiredAfterMs = Number(existing.deactivatedAtMs || 0);
+
+      if (passwordUpdatedAt > requiredAfterMs && requiredAfterMs > 0) {
+        await this.usersService.reactivateUser(existing.id);
+        reactivated = true;
+      } else {
+        throw new ForbiddenException({
+          message:
+            'Sua conta está desativada. Solicite o e-mail de reativação para definir uma nova senha e reativar seu acesso.',
+          code: 'ACCOUNT_DEACTIVATED',
+        });
+      }
+    }
+
+    if (!existing.firebaseUid) {
+      await this.usersService.linkFirebaseUid(existing.id, decoded.uid);
+    }
+
+    const profileIncomplete =
+      !existing.name?.trim() || !existing.cpf || !existing.phone;
+    if (isGoogle && profileIncomplete) {
+      const completionToken = this.jwtService.sign(
+        {
+          purpose: 'google_profile_completion',
+          email,
+          firebaseUid: decoded.uid,
+          name: existing.name || decoded.name || '',
+        },
+        { expiresIn: '15m' },
+      );
+
       return {
-        requiresProfileCompletion: false,
-        ...this.buildAuthResponse(existing),
+        requiresProfileCompletion: true,
+        completionToken,
+        googleProfile: {
+          email,
+          name: existing.name || decoded.name || '',
+          cpf: existing.cpf || '',
+          phone: existing.phone || '',
+        },
       };
     }
 
-    const completionToken = this.jwtService.sign(
-      {
-        purpose: 'google_profile_completion',
-        email,
-        googleUid: decoded.uid,
-        name: existing?.name || decoded.name || '',
-      },
-      { expiresIn: '15m' },
-    );
-
     return {
-      requiresProfileCompletion: true,
-      completionToken,
-      googleProfile: {
-        email,
-        name: existing?.name || decoded.name || '',
-        cpf: existing?.cpf || '',
-        phone: existing?.phone || '',
-      },
+      requiresProfileCompletion: false,
+      reactivated,
+      ...this.buildAuthResponse(existing),
     };
+  }
+
+  async registerWithFirebase(dto: FirebaseRegisterDto) {
+    let decoded;
+    try {
+      decoded = await this.firebase.verifyFirebaseIdToken(dto.idToken);
+    } catch {
+      throw new UnauthorizedException(
+        'Sessão de cadastro Firebase inválida ou expirada.',
+      );
+    }
+
+    const email = decoded.email?.trim().toLowerCase();
+    if (!email) {
+      throw new UnauthorizedException('E-mail ausente no token Firebase.');
+    }
+
+    const isPasswordProvider = decoded.signInProvider !== 'google.com';
+
+    try {
+      const user = await this.usersService.createFromFirebase({
+        email,
+        firebaseUid: decoded.uid,
+        authProvider: isPasswordProvider ? 'password' : 'google',
+        name: dto.name,
+        cpf: dto.cpf,
+        phone: dto.phone,
+      });
+
+      return this.buildAuthResponse(user);
+    } catch (error) {
+      if (isPasswordProvider) {
+        const existingInDb = await this.usersService.findByFirebaseUid(
+          decoded.uid,
+        );
+        if (!existingInDb) {
+          await this.firebase
+            .deleteFirebaseUser(decoded.uid)
+            .catch(() => undefined);
+        }
+      }
+      throw error;
+    }
   }
 
   async completeGoogleProfile(dto: GoogleCompleteDto) {
@@ -200,14 +249,15 @@ export class AuthService {
     if (
       payload.purpose !== 'google_profile_completion' ||
       !payload.email ||
-      !payload.googleUid
+      !payload.firebaseUid
     ) {
       throw new UnauthorizedException('Token de cadastro Google inválido.');
     }
 
-    const user = await this.usersService.createOrCompleteGoogleUser({
+    const user = await this.usersService.createFromFirebase({
       email: payload.email,
-      googleUid: payload.googleUid,
+      firebaseUid: payload.firebaseUid,
+      authProvider: 'google',
       name: dto.name,
       cpf: dto.cpf,
       phone: dto.phone,
@@ -216,110 +266,33 @@ export class AuthService {
     return this.buildAuthResponse(user);
   }
 
-  async requestPasswordReset(identifier: string) {
+  async requestPasswordResetOrReactivation(
+    identifier: string,
+    mode: 'reset' | 'reactivate' = 'reset',
+  ) {
     const user = await this.findUserByIdentifier(identifier);
     if (!user) {
       return {
         message:
-          'Se encontrarmos uma conta com esses dados, enviaremos um código de 6 dígitos para o e-mail cadastrado.',
+          'Se encontrarmos uma conta com esses dados, enviamos o e-mail oficial do Firebase para redefinir sua senha.',
         maskedEmail: null,
+        isDeactivated: false,
       };
     }
 
-    const code = String(randomInt(100000, 1000000));
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+    const effectiveMode: 'reset' | 'reactivate' =
+      user.isActive === false ? 'reactivate' : mode;
+    const continueUrl = this.getFrontendContinueUrl(effectiveMode);
 
-    const resetDoc: PasswordResetDoc = {
-      id: uuidv4(),
-      userId: user.id,
-      email: user.email,
-      codeHash: this.hashCode(code),
-      attempts: 0,
-      used: false,
-      expiresAt,
-      createdAt: now.toISOString(),
-    };
-
-    await this.firebase.setDoc(COLLECTIONS.PASSWORD_RESETS, resetDoc);
-
-    const emailSent = await this.sendRecoveryEmail(user.email, user.name, code);
-    const isLocalDev =
-      !process.env.VERCEL && process.env.NODE_ENV !== 'production';
+    await this.firebase.sendFirebasePasswordResetEmail(user.email, continueUrl);
 
     return {
-      message: emailSent
-        ? 'Enviamos um código de 6 dígitos para o e-mail vinculado à sua conta.'
-        : 'Código de recuperação gerado. Configure RESEND_API_KEY para envio automático por e-mail.',
+      message:
+        effectiveMode === 'reactivate'
+          ? 'Enviamos um e-mail oficial do Firebase com o botão/link para definir sua nova senha e reativar sua conta.'
+          : 'Enviamos um e-mail oficial do Firebase com o link para redefinir sua senha.',
       maskedEmail: this.maskEmail(user.email),
-      ...(isLocalDev && !emailSent ? { devCode: code } : {}),
-    };
-  }
-
-  async resetPassword(dto: ResetPasswordDto) {
-    const user = await this.findUserByIdentifier(dto.identifier);
-    if (!user) {
-      throw new BadRequestException(
-        'Código de recuperação inválido ou expirado.',
-      );
-    }
-
-    const resets = await this.firebase.findByField<PasswordResetDoc>(
-      COLLECTIONS.PASSWORD_RESETS,
-      'userId',
-      user.id,
-    );
-
-    const activeReset = resets
-      .filter((r) => !r.used && new Date(r.expiresAt).getTime() > Date.now())
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      )[0];
-
-    if (!activeReset) {
-      throw new BadRequestException(
-        'Código de recuperação inválido ou expirado.',
-      );
-    }
-
-    if (activeReset.attempts >= 5) {
-      await this.firebase.updateDoc(
-        COLLECTIONS.PASSWORD_RESETS,
-        activeReset.id,
-        { used: true },
-      );
-      throw new BadRequestException(
-        'Muitas tentativas incorretas. Solicite um novo código.',
-      );
-    }
-
-    const providedHash = Buffer.from(this.hashCode(dto.code), 'hex');
-    const storedHash = Buffer.from(activeReset.codeHash, 'hex');
-    const validCode =
-      providedHash.length === storedHash.length &&
-      timingSafeEqual(providedHash, storedHash);
-
-    if (!validCode) {
-      await this.firebase.updateDoc(
-        COLLECTIONS.PASSWORD_RESETS,
-        activeReset.id,
-        { attempts: activeReset.attempts + 1 },
-      );
-      throw new BadRequestException(
-        'Código de recuperação inválido ou expirado.',
-      );
-    }
-
-    await this.firebase.updateDoc(
-      COLLECTIONS.PASSWORD_RESETS,
-      activeReset.id,
-      { used: true },
-    );
-    await this.usersService.updatePassword(user.id, dto.newPassword);
-
-    return {
-      message: 'Senha redefinida com sucesso! Faça login com sua nova senha.',
+      isDeactivated: user.isActive === false,
     };
   }
 }

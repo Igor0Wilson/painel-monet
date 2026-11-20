@@ -2,26 +2,17 @@ export interface UserDoc {
   id: string;
   name: string;
   email: string;
-  password: string;
   cpf: string | null;
   phone: string | null;
-  googleUid?: string | null;
-  authProvider?: 'local' | 'google';
+  firebaseUid: string | null;
+  authProvider: 'password' | 'google';
+  isActive: boolean;
+  deactivatedAt: string | null;
+  deactivatedAtMs: number | null;
   emergencyFund: number;
   investments: number;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface PasswordResetDoc {
-  id: string;
-  userId: string;
-  email: string;
-  codeHash: string;
-  attempts: number;
-  used: boolean;
-  expiresAt: string;
-  createdAt: string;
 }
 
 export interface AccountTypeDoc {
@@ -96,7 +87,6 @@ export const COLLECTIONS = {
   USERS: 'users',
   CPF_LOCKS: 'cpf_locks',
   EMAIL_LOCKS: 'email_locks',
-  PASSWORD_RESETS: 'password_resets',
   ACCOUNT_TYPES: 'account_types',
   EXPENSES: 'expenses',
   INCOME: 'income',

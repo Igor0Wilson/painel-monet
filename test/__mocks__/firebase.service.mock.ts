@@ -1,10 +1,19 @@
 import { ConflictException } from '@nestjs/common';
 import { createHash } from 'crypto';
+import {
+  FirebaseAuthAccountInfo,
+  VerifiedFirebaseToken,
+} from '../../src/firebase/firebase.service';
 import { COLLECTIONS, UserDoc } from '../../src/firebase/firebase.types';
 
 export class InMemoryFirebaseService {
   private readonly store = new Map<string, Map<string, any>>();
-  public verifyGoogleIdTokenImpl?: (idToken: string) => Promise<any>;
+  public verifyFirebaseIdTokenImpl?: (
+    idToken: string,
+  ) => Promise<VerifiedFirebaseToken>;
+  public firebaseAccounts = new Map<string, FirebaseAuthAccountInfo>();
+  public deletedFirebaseUids: string[] = [];
+  public sentResetEmails: Array<{ email: string; continueUrl?: string }> = [];
 
   private getCollection(name: string): Map<string, any> {
     if (!this.store.has(name)) {
@@ -84,11 +93,57 @@ export class InMemoryFirebaseService {
     this.getCollection(collectionName).delete(id);
   }
 
-  async verifyGoogleIdToken(idToken: string): Promise<any> {
-    if (this.verifyGoogleIdTokenImpl) {
-      return this.verifyGoogleIdTokenImpl(idToken);
+  async verifyFirebaseIdToken(idToken: string): Promise<VerifiedFirebaseToken> {
+    if (this.verifyFirebaseIdTokenImpl) {
+      return this.verifyFirebaseIdTokenImpl(idToken);
     }
-    throw new Error('Token Google mock não configurado');
+    throw new Error('Token Firebase mock não configurado');
+  }
+
+  async lookupFirebaseUser(params: {
+    uid?: string;
+    email?: string;
+  }): Promise<FirebaseAuthAccountInfo | null> {
+    if (params.uid) {
+      return this.firebaseAccounts.get(params.uid) || null;
+    }
+    if (params.email) {
+      const target = params.email.trim().toLowerCase();
+      for (const acc of this.firebaseAccounts.values()) {
+        if (acc.email?.toLowerCase() === target) return acc;
+      }
+    }
+    return null;
+  }
+
+  async updateFirebaseUser(
+    uid: string,
+    updates: {
+      password?: string;
+      email?: string;
+      displayName?: string;
+      validSince?: number;
+    },
+  ): Promise<void> {
+    const current = this.firebaseAccounts.get(uid) || { localId: uid };
+    this.firebaseAccounts.set(uid, {
+      ...current,
+      ...(updates.email ? { email: updates.email } : {}),
+      ...(updates.displayName ? { displayName: updates.displayName } : {}),
+      ...(updates.password ? { passwordUpdatedAt: Date.now() } : {}),
+    });
+  }
+
+  async deleteFirebaseUser(uid: string): Promise<void> {
+    this.deletedFirebaseUids.push(uid);
+    this.firebaseAccounts.delete(uid);
+  }
+
+  async sendFirebasePasswordResetEmail(
+    email: string,
+    continueUrl?: string,
+  ): Promise<void> {
+    this.sentResetEmails.push({ email, continueUrl });
   }
 
   async createUserWithAtomicLocks(user: UserDoc): Promise<UserDoc> {
@@ -165,6 +220,14 @@ export class InMemoryFirebaseService {
     const merged = { ...currentUser, ...updateData };
     this.getCollection(COLLECTIONS.USERS).set(userId, merged);
     return { ...merged };
+  }
+
+  async deleteUserAndLocks(user: UserDoc): Promise<void> {
+    this.getCollection(COLLECTIONS.USERS).delete(user.id);
+    this.getCollection(COLLECTIONS.EMAIL_LOCKS).delete(this.lockKey(user.email));
+    if (user.cpf) {
+      this.getCollection(COLLECTIONS.CPF_LOCKS).delete(this.lockKey(user.cpf));
+    }
   }
 
   async healthCheck(): Promise<boolean> {

@@ -1,10 +1,14 @@
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 
-describe('AuthService (Google + Recovery)', () => {
+describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
   let firebase: InMemoryFirebaseService;
   let usersService: UsersService;
   let jwtService: JwtService;
@@ -20,89 +24,109 @@ describe('AuthService (Google + Recovery)', () => {
     authService = new AuthService(usersService, jwtService, firebase as any);
   });
 
-  it('requires profile completion on first Google login', async () => {
-    firebase.verifyGoogleIdTokenImpl = async () => ({
-      uid: 'g-1',
-      email: 'novo@gmail.com',
+  it('rejects password login when user exists in Firebase Auth but not in our database', async () => {
+    firebase.verifyFirebaseIdTokenImpl = async () => ({
+      uid: 'fb-only-1',
+      email: 'fantasma@gmail.com',
       email_verified: true,
-      name: 'Novo Usuario',
+      signInProvider: 'password',
+      authTime: Math.floor(Date.now() / 1000),
     });
 
-    const result = await authService.loginWithGoogle('valid-google-token');
-
-    expect(result.requiresProfileCompletion).toBe(true);
-    expect((result as any).googleProfile.email).toBe('novo@gmail.com');
-    expect((result as any).completionToken).toBeTruthy();
-  });
-
-  it('completes Google registration and logs in directly on subsequent Google login', async () => {
-    firebase.verifyGoogleIdTokenImpl = async () => ({
-      uid: 'g-2',
-      email: 'cliente@gmail.com',
-      email_verified: true,
-      name: 'Cliente Gmail',
-    });
-
-    const first = (await authService.loginWithGoogle('token-1')) as any;
-    const completed = await authService.completeGoogleProfile({
-      completionToken: first.completionToken,
-      name: 'Cliente Completo',
-      cpf: '529.982.247-25',
-      phone: '(11) 99999-1111',
-    });
-
-    expect(completed.access_token).toBeTruthy();
-    expect(completed.user.cpf).toBe('52998224725');
-
-    const second = (await authService.loginWithGoogle('token-2')) as any;
-    expect(second.requiresProfileCompletion).toBe(false);
-    expect(second.access_token).toBeTruthy();
-  });
-
-  it('rejects invalid Google ID tokens', async () => {
-    firebase.verifyGoogleIdTokenImpl = async () => {
-      throw new Error('invalid token');
-    };
-
-    await expect(authService.loginWithGoogle('bad-token')).rejects.toThrow(
+    await expect(authService.loginWithFirebase('token')).rejects.toThrow(
       UnauthorizedException,
     );
   });
 
-  it('resets password with valid 6-digit recovery code by CPF', async () => {
-    await usersService.create({
-      name: 'Carlos',
-      email: 'carlos@gmail.com',
-      password: 'OldPassword1',
-      cpf: '52998224725',
-      phone: '11999990000',
+  it('requires profile completion on first Google login', async () => {
+    firebase.verifyFirebaseIdTokenImpl = async () => ({
+      uid: 'g-1',
+      email: 'novo@gmail.com',
+      email_verified: true,
+      name: 'Novo Usuario',
+      signInProvider: 'google.com',
+      authTime: Math.floor(Date.now() / 1000),
     });
 
-    const resetReq = (await authService.requestPasswordReset(
-      '529.982.247-25',
-    )) as any;
-    expect(resetReq.maskedEmail).toBe('ca***@gmail.com');
-    expect(resetReq.devCode).toHaveLength(6);
+    const result = (await authService.loginWithFirebase('valid-token')) as any;
+    expect(result.requiresProfileCompletion).toBe(true);
+    expect(result.googleProfile.email).toBe('novo@gmail.com');
+  });
+
+  it('rolls back orphan Firebase Auth user when CPF already exists during registration', async () => {
+    await usersService.createFromFirebase({
+      email: 'existente@gmail.com',
+      firebaseUid: 'fb-1',
+      authProvider: 'password',
+      name: 'Existente',
+      cpf: '52998224725',
+      phone: '11999991111',
+    });
+
+    firebase.verifyFirebaseIdTokenImpl = async () => ({
+      uid: 'fb-orphan',
+      email: 'outro@gmail.com',
+      email_verified: false,
+      signInProvider: 'password',
+      authTime: Math.floor(Date.now() / 1000),
+    });
 
     await expect(
-      authService.resetPassword({
-        identifier: '52998224725',
-        code: '000000',
-        newPassword: 'NewPassword123',
+      authService.registerWithFirebase({
+        idToken: 'orphan-token',
+        name: 'Outro',
+        cpf: '529.982.247-25',
+        phone: '11988887777',
       }),
-    ).rejects.toThrow(BadRequestException);
+    ).rejects.toThrow(ConflictException);
 
-    const done = await authService.resetPassword({
-      identifier: '52998224725',
-      code: resetReq.devCode,
-      newPassword: 'NewPassword123',
+    expect(firebase.deletedFirebaseUids).toContain('fb-orphan');
+  });
+
+  it('blocks deactivated account login until password is reset via Firebase email', async () => {
+    const user = await usersService.createFromFirebase({
+      email: 'cliente@gmail.com',
+      firebaseUid: 'fb-10',
+      authProvider: 'password',
+      name: 'Cliente',
+      cpf: '52998224725',
+      phone: '11999991111',
     });
-    expect(done.message).toContain('sucesso');
 
-    const loginRes = await authService.login(
-      'carlos@gmail.com',
-      'NewPassword123',
+    await usersService.deactivateAccount(user.id, true);
+
+    firebase.verifyFirebaseIdTokenImpl = async () => ({
+      uid: 'fb-10',
+      email: 'cliente@gmail.com',
+      email_verified: true,
+      signInProvider: 'google.com',
+      authTime: Math.floor(Date.now() / 1000),
+    });
+
+    await expect(authService.loginWithFirebase('token-deactivated')).rejects.toThrow(
+      ForbiddenException,
     );
-    expect(loginRes.access_token).toBeTruthy();
+
+    const resetRes = await authService.requestPasswordResetOrReactivation(
+      '529.982.247-25',
+      'reactivate',
+    );
+    expect(resetRes.maskedEmail).toBe('cl***@gmail.com');
+    expect(firebase.sentResetEmails[0].email).toBe('cliente@gmail.com');
+
+    firebase.firebaseAccounts.set('fb-10', {
+      localId: 'fb-10',
+      email: 'cliente@gmail.com',
+      passwordUpdatedAt: Date.now() + 5000,
+    });
+
+    const loginAfterReset = (await authService.loginWithFirebase(
+      'token-after-reset',
+    )) as any;
+    expect(loginAfterReset.reactivated).toBe(true);
+    expect(loginAfterReset.access_token).toBeTruthy();
+
+    const reloaded = await usersService.findById(user.id);
+    expect(reloaded?.isActive).toBe(true);
   });
 });
