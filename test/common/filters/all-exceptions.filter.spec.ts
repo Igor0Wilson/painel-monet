@@ -4,7 +4,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
-import { AllExceptionsFilter } from './all-exceptions.filter';
+import { AllExceptionsFilter } from '../../../src/common/filters/all-exceptions.filter';
 
 describe('AllExceptionsFilter', () => {
   let filter: AllExceptionsFilter;

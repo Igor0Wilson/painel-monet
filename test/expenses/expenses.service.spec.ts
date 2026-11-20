@@ -1,9 +1,12 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
-import { FamilyService } from '../family/family.service';
-import { FirebaseService } from '../firebase/firebase.service';
-import { COLLECTIONS } from '../firebase/firebase.types';
-import { ExpensesService, ExpenseWithStatus } from './expenses.service';
+import {
+  ExpensesService,
+  ExpenseWithStatus,
+} from '../../src/expenses/expenses.service';
+import { FamilyService } from '../../src/family/family.service';
+import { FirebaseService } from '../../src/firebase/firebase.service';
+import { COLLECTIONS } from '../../src/firebase/firebase.types';
+import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 describe('ExpensesService (Firestore)', () => {
   let firebase: InMemoryFirebaseService;
@@ -30,7 +33,12 @@ describe('ExpensesService (Firestore)', () => {
         userMap: new Map([
           [
             'u-1',
-            { id: 'u-1', name: 'Igor', maskedCpf: '***.456.789-**', phone: null },
+            {
+              id: 'u-1',
+              name: 'Igor',
+              maskedCpf: '***.456.789-**',
+              phone: null,
+            },
           ],
         ]),
         familyGroupId: null,
@@ -71,7 +79,7 @@ describe('ExpensesService (Firestore)', () => {
   });
 
   it('creates spot purchase paid via Pix immediately', async () => {
-    const result = await service.create(
+    const result = (await service.create(
       {
         name: 'Fast Food',
         accountTypeId: 'cat-1',
@@ -82,7 +90,7 @@ describe('ExpensesService (Firestore)', () => {
         paymentMethod: 'pix',
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus;
 
     expect(result.isPaid).toBe(true);
     expect(result.paymentMethod).toBe('pix');
@@ -90,7 +98,7 @@ describe('ExpensesService (Firestore)', () => {
   });
 
   it('marks expense as paid via Pix without generating credit card installments', async () => {
-    const created = await service.create(
+    const created = (await service.create(
       {
         name: 'Energia',
         accountTypeId: 'cat-1',
@@ -99,7 +107,7 @@ describe('ExpensesService (Firestore)', () => {
         isRecurring: false,
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus;
 
     const res = await service.markAsPaid(created.id, 'u-1', {
       paymentMethod: 'pix',
@@ -111,7 +119,7 @@ describe('ExpensesService (Firestore)', () => {
   });
 
   it('marks expense as paid via Credit Card and generates linked monthly installments', async () => {
-    const created = await service.create(
+    const created = (await service.create(
       {
         name: 'Monitor',
         accountTypeId: 'cat-1',
@@ -120,7 +128,7 @@ describe('ExpensesService (Firestore)', () => {
         isRecurring: false,
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus;
 
     const res = await service.markAsPaid(created.id, 'u-1', {
       paymentMethod: 'credito',
@@ -131,9 +139,9 @@ describe('ExpensesService (Firestore)', () => {
     expect(res.isPaid).toBe(true);
     expect(res.paymentMethod).toBe('credito');
     expect(res.generatedInstallments).toHaveLength(2);
-    expect(res.generatedInstallments[0].dueDate).toBe('2026-12-10');
-    expect(res.generatedInstallments[1].dueDate).toBe('2027-01-10');
-    expect(res.generatedInstallments[0].value).toBe(300);
+    expect(res.generatedInstallments?.[0].dueDate).toBe('2026-12-10');
+    expect(res.generatedInstallments?.[1].dueDate).toBe('2027-01-10');
+    expect(res.generatedInstallments?.[0].value).toBe(300);
   });
 
   it('validates credit card required fields and already-paid guard in markAsPaid', async () => {
@@ -141,7 +149,7 @@ describe('ExpensesService (Firestore)', () => {
       NotFoundException,
     );
 
-    const paid = await service.create(
+    const paid = (await service.create(
       {
         name: 'Lanche',
         accountTypeId: 'cat-1',
@@ -152,12 +160,12 @@ describe('ExpensesService (Firestore)', () => {
         paymentMethod: 'pix',
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus;
     await expect(service.markAsPaid(paid.id, 'u-1')).rejects.toThrow(
       BadRequestException,
     );
 
-    const pending = await service.create(
+    const pending = (await service.create(
       {
         name: 'Internet',
         accountTypeId: 'cat-1',
@@ -166,7 +174,7 @@ describe('ExpensesService (Firestore)', () => {
         isRecurring: false,
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus;
     await expect(
       service.markAsPaid(pending.id, 'u-1', { paymentMethod: 'credito' }),
     ).rejects.toThrow(BadRequestException);

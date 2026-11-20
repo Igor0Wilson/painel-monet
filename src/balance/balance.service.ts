@@ -55,7 +55,9 @@ export class BalanceService {
 
     const totalExpenses = cashExpenses + foodAllowanceUsed;
     const emergencyFund = Number(user.emergencyFund || 0);
-    const investments = Number(user.investments || 0);
+    const allocatedInvestments = Number(user.investments || 0);
+    const externalInvestments = Number(user.externalInvestments || 0);
+    const investments = allocatedInvestments + externalInvestments;
     const foodAllowanceConfigured = Number(user.foodAllowance || 0);
     const foodAllowanceDate = user.foodAllowanceDate || formatDateOnly(today);
     const foodAllowanceRecurring =
@@ -85,7 +87,8 @@ export class BalanceService {
       0,
       Number((foodAllowanceTotal - foodAllowanceUsed).toFixed(2)),
     );
-    const balance = totalIncome - cashExpenses - emergencyFund - investments;
+    const balance =
+      totalIncome - cashExpenses - emergencyFund - allocatedInvestments;
 
     return {
       balance: Number(balance.toFixed(2)),
@@ -94,6 +97,8 @@ export class BalanceService {
       totalExpenses: Number(totalExpenses.toFixed(2)),
       emergencyFund: Number(emergencyFund.toFixed(2)),
       investments: Number(investments.toFixed(2)),
+      allocatedInvestments: Number(allocatedInvestments.toFixed(2)),
+      externalInvestments: Number(externalInvestments.toFixed(2)),
       foodAllowance: Number(foodAllowance.toFixed(2)),
       foodAllowanceTotal: Number(foodAllowanceTotal.toFixed(2)),
       foodAllowanceConfigured: Number(foodAllowanceConfigured.toFixed(2)),
@@ -153,6 +158,8 @@ export class BalanceService {
         totalExpenses: acc.totalExpenses + m.totalExpenses,
         emergencyFund: acc.emergencyFund + m.emergencyFund,
         investments: acc.investments + m.investments,
+        allocatedInvestments: acc.allocatedInvestments + m.allocatedInvestments,
+        externalInvestments: acc.externalInvestments + m.externalInvestments,
         foodAllowance: acc.foodAllowance + m.foodAllowance,
         foodAllowanceTotal: acc.foodAllowanceTotal + m.foodAllowanceTotal,
         foodAllowanceScheduled:
@@ -166,6 +173,8 @@ export class BalanceService {
         totalExpenses: 0,
         emergencyFund: 0,
         investments: 0,
+        allocatedInvestments: 0,
+        externalInvestments: 0,
         foodAllowance: 0,
         foodAllowanceTotal: 0,
         foodAllowanceScheduled: 0,
@@ -183,6 +192,8 @@ export class BalanceService {
       totalExpenses: Number(totals.totalExpenses.toFixed(2)),
       emergencyFund: Number(totals.emergencyFund.toFixed(2)),
       investments: Number(totals.investments.toFixed(2)),
+      allocatedInvestments: Number(totals.allocatedInvestments.toFixed(2)),
+      externalInvestments: Number(totals.externalInvestments.toFixed(2)),
       foodAllowance: Number(totals.foodAllowance.toFixed(2)),
       foodAllowanceTotal: Number(totals.foodAllowanceTotal.toFixed(2)),
       foodAllowanceScheduled: Number(totals.foodAllowanceScheduled.toFixed(2)),
@@ -190,6 +201,8 @@ export class BalanceService {
       ownBalance: selfMetrics?.balance ?? 0,
       ownEmergencyFund: selfMetrics?.emergencyFund ?? 0,
       ownInvestments: selfMetrics?.investments ?? 0,
+      ownAllocatedInvestments: selfMetrics?.allocatedInvestments ?? 0,
+      ownExternalInvestments: selfMetrics?.externalInvestments ?? 0,
       ownFoodAllowance: selfMetrics?.foodAllowance ?? 0,
       ownFoodAllowanceTotal: selfMetrics?.foodAllowanceTotal ?? 0,
       ownFoodAllowanceConfigured: selfMetrics?.foodAllowanceConfigured ?? 0,
@@ -226,25 +239,40 @@ export class BalanceService {
     return this.getBalance(userId, 'individual');
   }
 
-  async updateInvestments(userId: string, amount: number) {
+  async updateInvestments(
+    userId: string,
+    amount: number,
+    fromAvailableBalance = true,
+  ) {
+    if (amount < 0) {
+      throw new BadRequestException('O valor em investimentos não pode ser negativo.');
+    }
+
     const user = await this.firebase.findById<UserDoc>(
       COLLECTIONS.USERS,
       userId,
     );
     if (user) {
-      const current = await this.getBalance(userId, 'individual');
-      const maxAllowed = Number(
-        (current.ownBalance + current.ownInvestments).toFixed(2),
-      );
-      if (amount > maxAllowed + 0.001) {
-        throw new BadRequestException(
-          'O valor em investimentos não pode exceder o seu patrimônio disponível.',
+      if (fromAvailableBalance) {
+        const current = await this.getBalance(userId, 'individual');
+        const maxAllowed = Number(
+          (current.ownBalance + current.ownAllocatedInvestments).toFixed(2),
         );
+        if (amount > maxAllowed + 0.001) {
+          throw new BadRequestException(
+            'O valor em investimentos descontado do saldo do mês não pode exceder o seu patrimônio disponível. Para registrar investimentos já existentes, selecione "Investimento já existente".',
+          );
+        }
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          investments: Number(amount),
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          externalInvestments: Number(amount),
+          updatedAt: new Date().toISOString(),
+        });
       }
-      await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
-        investments: Number(amount),
-        updatedAt: new Date().toISOString(),
-      });
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
     }
     return this.getBalance(userId, 'individual');

@@ -14,7 +14,12 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
 const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['value'],
   [COLLECTIONS.EXPENSES]: ['value'],
-  [COLLECTIONS.USERS]: ['emergencyFund', 'investments', 'foodAllowance'],
+  [COLLECTIONS.USERS]: [
+    'emergencyFund',
+    'investments',
+    'externalInvestments',
+    'foodAllowance',
+  ],
 };
 
 function getMasterKey(): Buffer {

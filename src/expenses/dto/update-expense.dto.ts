@@ -1,13 +1,15 @@
 import {
   IsBoolean,
   IsDateString,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
   IsString,
-  IsUUID,
+  Max,
   Min,
 } from 'class-validator';
+import type { PaymentMethod } from './pay-expense.dto';
 
 export class UpdateExpenseDto {
   @IsString()
@@ -37,10 +39,19 @@ export class UpdateExpenseDto {
 
   @IsInt()
   @IsOptional()
-  @Min(2)
+  @Min(1)
+  @Max(60)
   installmentCount?: number;
 
   @IsBoolean()
   @IsOptional()
   isPaid?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  isCreditCard?: boolean;
+
+  @IsOptional()
+  @IsIn(['dinheiro', 'pix', 'debito', 'credito', 'va', 'vr'])
+  paymentMethod?: PaymentMethod;
 }

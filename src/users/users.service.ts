@@ -117,6 +117,7 @@ export class UsersService {
       deactivatedAtMs: null,
       emergencyFund: 0,
       investments: 0,
+      externalInvestments: 0,
       foodAllowance: 0,
       createdAt: now,
       updatedAt: now,
@@ -402,7 +403,9 @@ export class UsersService {
     }).filter(Boolean);
 
     const emergencyFund = Number(user.emergencyFund || 0);
-    const investments = Number(user.investments || 0);
+    const allocatedInvestments = Number(user.investments || 0);
+    const externalInvestments = Number(user.externalInvestments || 0);
+    const investments = allocatedInvestments + externalInvestments;
     const foodAllowanceTotal = Number(user.foodAllowance || 0);
     const foodAllowanceRemaining = Math.max(
       0,
@@ -413,7 +416,7 @@ export class UsersService {
         totalCreditedIncome -
         totalCashPaidExpenses -
         emergencyFund -
-        investments
+        allocatedInvestments
       ).toFixed(2),
     );
 

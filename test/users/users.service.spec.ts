@@ -3,10 +3,10 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
-import { FirebaseService } from '../firebase/firebase.service';
-import { COLLECTIONS } from '../firebase/firebase.types';
-import { UsersService } from './users.service';
+import { FirebaseService } from '../../src/firebase/firebase.service';
+import { COLLECTIONS } from '../../src/firebase/firebase.types';
+import { UsersService } from '../../src/users/users.service';
+import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 describe('UsersService (Firebase Auth + Firestore)', () => {
   let firebase: InMemoryFirebaseService;
@@ -126,7 +126,9 @@ describe('UsersService (Firebase Auth + Firestore)', () => {
     const updated = await service.findById(user.id);
     expect(updated?.isActive).toBe(false);
     expect(updated?.deactivatedAtMs).toBeGreaterThan(0);
-    expect(firebase.firebaseAccounts.get('fb-6')?.passwordUpdatedAt).toBeTruthy();
+    expect(
+      firebase.firebaseAccounts.get('fb-6')?.passwordUpdatedAt,
+    ).toBeTruthy();
   });
 
   it('permanently deletes Firestore data, locks and Firebase Auth user', async () => {

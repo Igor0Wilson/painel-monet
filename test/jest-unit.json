@@ -1,0 +1,16 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "roots": ["<rootDir>/test"],
+  "testMatch": ["<rootDir>/test/**/*.spec.ts"],
+  "testPathIgnorePatterns": ["\\.component\\.spec\\.ts$", "\\.e2e-spec\\.ts$"],
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^uuid$": "<rootDir>/test/__mocks__/uuid.ts"
+  },
+  "collectCoverageFrom": ["src/**/*.(t|j)s", "!src/main.ts"],
+  "coverageDirectory": "./coverage/unit",
+  "testEnvironment": "node"
+}

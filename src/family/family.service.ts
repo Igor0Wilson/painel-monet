@@ -395,7 +395,8 @@ export class FamilyService {
       0,
     );
     const invSum = users.reduce(
-      (acc, u) => acc + Number(u.investments || 0),
+      (acc, u) =>
+        acc + Number(u.investments || 0) + Number(u.externalInvestments || 0),
       0,
     );
     const foodSum = users.reduce(

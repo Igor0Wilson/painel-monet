@@ -4,11 +4,11 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
-import { FirebaseService } from '../firebase/firebase.service';
-import { COLLECTIONS } from '../firebase/firebase.types';
-import { FamilyEventsService } from './family-events.service';
-import { FamilyService } from './family.service';
+import { FamilyEventsService } from '../../src/family/family-events.service';
+import { FamilyService } from '../../src/family/family.service';
+import { FirebaseService } from '../../src/firebase/firebase.service';
+import { COLLECTIONS } from '../../src/firebase/firebase.types';
+import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 function makeCpf(base9: string): string {
   const digits = base9.split('').map(Number);
@@ -76,14 +76,14 @@ describe('FamilyService (Firestore)', () => {
 
     it('fails closed (403) if user lacks valid CPF or verified family membership', async () => {
       await firebase.updateDoc(COLLECTIONS.USERS, 'u-1', { cpf: null });
-      await expect(service.resolveAuthorizedScope('u-1', 'family')).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.resolveAuthorizedScope('u-1', 'family'),
+      ).rejects.toThrow(ForbiddenException);
 
       await firebase.updateDoc(COLLECTIONS.USERS, 'u-1', { cpf: cpfA });
-      await expect(service.resolveAuthorizedScope('u-1', 'family')).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.resolveAuthorizedScope('u-1', 'family'),
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it('only includes members whose current user.cpf strictly matches family_members.userCpf', async () => {
@@ -155,9 +155,9 @@ describe('FamilyService (Firestore)', () => {
       expect(status.inFamily).toBe(true);
       expect(status.members).toHaveLength(2);
 
-      await expect(
-        service.inviteByCpf('u-1', cpfB),
-      ).rejects.toThrow(ConflictException);
+      await expect(service.inviteByCpf('u-1', cpfB)).rejects.toThrow(
+        ConflictException,
+      );
     });
   });
 });

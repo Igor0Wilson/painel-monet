@@ -1,9 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
-import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
-import { FamilyService } from '../family/family.service';
-import { FirebaseService } from '../firebase/firebase.service';
-import { COLLECTIONS } from '../firebase/firebase.types';
-import { BalanceService } from './balance.service';
+import { BalanceService } from '../../src/balance/balance.service';
+import { FamilyService } from '../../src/family/family.service';
+import { FirebaseService } from '../../src/firebase/firebase.service';
+import { COLLECTIONS } from '../../src/firebase/firebase.types';
+import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 describe('BalanceService (Firestore)', () => {
   let firebase: InMemoryFirebaseService;
@@ -22,7 +22,12 @@ describe('BalanceService (Firestore)', () => {
         userMap: new Map([
           [
             'u-1',
-            { id: 'u-1', name: 'Igor', maskedCpf: '***.456.789-**', phone: null },
+            {
+              id: 'u-1',
+              name: 'Igor',
+              maskedCpf: '***.456.789-**',
+              phone: null,
+            },
           ],
         ]),
         familyGroupId: null,
@@ -224,5 +229,38 @@ describe('BalanceService (Firestore)', () => {
     expect(oct.monthSummary.totalIncome).toBe(1500);
     expect(oct.monthSummary.totalExpenses).toBe(200);
     expect(oct.monthSummary.netFlow).toBe(1300);
+  });
+
+  it('registers unlimited pre-existing investments without deducting from monthly balance', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-1',
+      name: 'Igor',
+      email: 'igor@test.com',
+      password: 'hash',
+      cpf: null,
+      phone: null,
+      emergencyFund: 0,
+      investments: 200,
+      externalInvestments: 0,
+      createdAt: '',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.INCOME, {
+      id: 'inc-1',
+      userId: 'u-1',
+      name: 'Salário',
+      value: 1000,
+      incomeDate: '2020-01-01',
+      isRecurring: false,
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    const updated = await service.updateInvestments('u-1', 25000, false);
+
+    expect(updated.externalInvestments).toBe(25000);
+    expect(updated.allocatedInvestments).toBe(200);
+    expect(updated.investments).toBe(25200);
+    expect(updated.balance).toBe(800);
   });
 });

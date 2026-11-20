@@ -1,0 +1,15 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "roots": ["<rootDir>/test"],
+  "testMatch": ["<rootDir>/test/**/*.component.spec.ts"],
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^uuid$": "<rootDir>/test/__mocks__/uuid.ts"
+  },
+  "collectCoverageFrom": ["src/**/*.(t|j)s", "!src/main.ts"],
+  "coverageDirectory": "./coverage/component",
+  "testEnvironment": "node"
+}

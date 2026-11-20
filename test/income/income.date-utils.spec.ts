@@ -6,7 +6,7 @@ import {
   getDaysInMonth,
   getIncomeAmountForMonth,
   parseDateOnly,
-} from './income.date-utils';
+} from '../../src/income/income.date-utils';
 
 describe('income.date-utils', () => {
   it('parses and formats date strings with zero padding', () => {

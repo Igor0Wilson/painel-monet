@@ -1,11 +1,11 @@
-import { COLLECTIONS } from '../firebase/firebase.types';
 import {
   decryptDocumentFromStorage,
   decryptFieldValue,
   encryptDocumentForStorage,
   encryptFieldValue,
   isEncryptedValue,
-} from './data-crypto.utils';
+} from '../../src/common/data-crypto.utils';
+import { COLLECTIONS } from '../../src/firebase/firebase.types';
 
 describe('data-crypto.utils', () => {
   it('encrypts and decrypts income (work/salary) names and values so no plaintext is stored in DB', () => {
@@ -24,7 +24,9 @@ describe('data-crypto.utils', () => {
     expect(stored.name).not.toContain('Salário');
     expect(isEncryptedValue(stored.value)).toBe(true);
     expect(String(stored.value)).not.toContain('8500');
-    expect(stored.securityHash).toBeDefined();
+    expect(
+      (stored as Record<string, unknown>).securityHash,
+    ).toBeDefined();
 
     const decrypted = decryptDocumentFromStorage(COLLECTIONS.INCOME, stored);
     expect(decrypted?.name).toBe('Salário Empresa Tech');

@@ -520,7 +520,19 @@ export class ExpensesService {
     if (dto.isRecurring !== undefined) {
       updateData.isRecurring = Boolean(dto.isRecurring);
     }
+    if (dto.isInstallment !== undefined) {
+      updateData.isInstallment = Boolean(dto.isInstallment);
+    }
+    if (dto.installmentCount !== undefined) {
+      updateData.installmentCount = dto.installmentCount;
+    }
     if (dto.isPaid !== undefined) updateData.isPaid = Boolean(dto.isPaid);
+    if (dto.isCreditCard !== undefined) {
+      updateData.isCreditCard = Boolean(dto.isCreditCard);
+    }
+    if (dto.paymentMethod !== undefined) {
+      updateData.paymentMethod = dto.paymentMethod;
+    }
 
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, updateData);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');

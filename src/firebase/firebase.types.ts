@@ -11,6 +11,7 @@ export interface UserDoc {
   deactivatedAtMs: number | null;
   emergencyFund: number;
   investments: number;
+  externalInvestments?: number;
   foodAllowance?: number;
   foodAllowanceDate?: string | null;
   foodAllowanceRecurring?: boolean;

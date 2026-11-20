@@ -4,11 +4,11 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
-import { FirebaseService } from '../firebase/firebase.service';
-import { UsersService } from '../users/users.service';
-import { AuthService } from './auth.service';
-import { EmailSenderService } from './email-sender.service';
+import { AuthService } from '../../src/auth/auth.service';
+import { EmailSenderService } from '../../src/auth/email-sender.service';
+import { FirebaseService } from '../../src/firebase/firebase.service';
+import { UsersService } from '../../src/users/users.service';
+import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
   let firebase: InMemoryFirebaseService;
@@ -115,9 +115,9 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
       authTime: Math.floor(Date.now() / 1000),
     });
 
-    await expect(authService.loginWithFirebase('token-deactivated')).rejects.toThrow(
-      ForbiddenException,
-    );
+    await expect(
+      authService.loginWithFirebase('token-deactivated'),
+    ).rejects.toThrow(ForbiddenException);
 
     const resetRes = await authService.requestPasswordResetOrReactivation(
       '529.982.247-25',

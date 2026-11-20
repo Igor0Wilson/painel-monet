@@ -46,7 +46,11 @@ export class BalanceController {
     @Request() req: AuthenticatedRequest,
     @Body() dto: UpdateInvestmentsDto,
   ) {
-    return this.service.updateInvestments(req.user.userId, dto.amount);
+    return this.service.updateInvestments(
+      req.user.userId,
+      dto.amount,
+      dto.fromAvailableBalance ?? true,
+    );
   }
 
   @Post('food-allowance')

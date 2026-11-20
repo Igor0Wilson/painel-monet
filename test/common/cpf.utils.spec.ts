@@ -4,7 +4,7 @@ import {
   maskCpf,
   normalizeCpf,
   normalizePhone,
-} from './cpf.utils';
+} from '../../src/common/cpf.utils';
 
 function buildCpf(base9: string): string {
   const digits = base9.split('').map(Number);
@@ -85,7 +85,9 @@ describe('cpf.utils', () => {
   describe('normalizePhone', () => {
     it('removes formatting and clamps to 15 digits', () => {
       expect(normalizePhone('(11) 99999-8888')).toBe('11999998888');
-      expect(normalizePhone('+55 (11) 99999-8888123456')).toBe('551199999888812');
+      expect(normalizePhone('+55 (11) 99999-8888123456')).toBe(
+        '551199999888812',
+      );
       expect(normalizePhone('')).toBe('');
       expect(normalizePhone(undefined)).toBe('');
     });

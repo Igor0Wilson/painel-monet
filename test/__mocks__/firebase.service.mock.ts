@@ -6,8 +6,10 @@ import {
 } from '../../src/firebase/firebase.service';
 import { COLLECTIONS, UserDoc } from '../../src/firebase/firebase.types';
 
+type StoredDoc = Record<string, unknown>;
+
 export class InMemoryFirebaseService {
-  private readonly store = new Map<string, Map<string, any>>();
+  private readonly store = new Map<string, Map<string, StoredDoc>>();
   public verifyFirebaseIdTokenImpl?: (
     idToken: string,
   ) => Promise<VerifiedFirebaseToken>;
@@ -15,7 +17,7 @@ export class InMemoryFirebaseService {
   public deletedFirebaseUids: string[] = [];
   public sentResetEmails: Array<{ email: string; continueUrl?: string }> = [];
 
-  private getCollection(name: string): Map<string, any> {
+  private getCollection(name: string): Map<string, StoredDoc> {
     if (!this.store.has(name)) {
       this.store.set(name, new Map());
     }
@@ -64,7 +66,10 @@ export class InMemoryFirebaseService {
     const col = this.getCollection(collectionName);
     const out: T[] = [];
     col.forEach((doc) => {
-      if (set.has(doc[field])) out.push({ ...doc } as T);
+      const fieldVal = doc[field];
+      if (typeof fieldVal === 'string' && set.has(fieldVal)) {
+        out.push({ ...doc } as T);
+      }
     });
     return out;
   }
@@ -73,14 +78,16 @@ export class InMemoryFirebaseService {
     collectionName: string,
     doc: T,
   ): Promise<T> {
-    this.getCollection(collectionName).set(doc.id, { ...doc });
+    this.getCollection(collectionName).set(doc.id, {
+      ...(doc as unknown as StoredDoc),
+    });
     return { ...doc };
   }
 
   async updateDoc(
     collectionName: string,
     id: string,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
   ): Promise<void> {
     const col = this.getCollection(collectionName);
     const existing = col.get(id);
