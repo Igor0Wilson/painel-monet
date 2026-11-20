@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Todo acesso passa exclusivamente pelo backend NestJS autenticado via Firebase Admin SDK (JWT + CPF + ID).
+    // Bloqueia 100% de leitura e escrita direta pelo cliente web para proteção máxima de dados financeiros e CPF.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

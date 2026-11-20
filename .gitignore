@@ -1,0 +1,15 @@
+/dist
+/node_modules
+/.vercel
+/.env
+/.env.*
+!/.env.example
+/firebase-service-account.json
+/*firebase-adminsdk*.json
+*.pem
+*.key
+/coverage
+/reports
+/.stryker-tmp
+/scripts
+npm-debug.log*
