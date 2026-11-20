@@ -12,6 +12,8 @@ export interface UserDoc {
   emergencyFund: number;
   investments: number;
   foodAllowance?: number;
+  foodAllowanceDate?: string | null;
+  foodAllowanceRecurring?: boolean;
   createdAt: string;
   updatedAt: string;
 }

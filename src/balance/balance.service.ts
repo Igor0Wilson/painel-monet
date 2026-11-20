@@ -12,6 +12,7 @@ import {
 import {
   compareDateParts,
   evaluateIncomeCredit,
+  formatDateOnly,
   getDaysInMonth,
   getTodayParts,
   parseDateOnly,
@@ -55,7 +56,31 @@ export class BalanceService {
     const totalExpenses = cashExpenses + foodAllowanceUsed;
     const emergencyFund = Number(user.emergencyFund || 0);
     const investments = Number(user.investments || 0);
-    const foodAllowanceTotal = Number(user.foodAllowance || 0);
+    const foodAllowanceConfigured = Number(user.foodAllowance || 0);
+    const foodAllowanceDate = user.foodAllowanceDate || formatDateOnly(today);
+    const foodAllowanceRecurring =
+      user.foodAllowanceRecurring !== undefined
+        ? Boolean(user.foodAllowanceRecurring)
+        : true;
+
+    let foodAllowanceTotal = 0;
+    let foodAllowanceScheduled = 0;
+    let foodAllowanceNextDate: string | null = null;
+
+    if (foodAllowanceConfigured > 0) {
+      const foodEval = evaluateIncomeCredit(
+        {
+          value: foodAllowanceConfigured,
+          incomeDate: foodAllowanceDate,
+          isRecurring: foodAllowanceRecurring,
+        },
+        today,
+      );
+      foodAllowanceTotal = foodEval.creditedAmount;
+      foodAllowanceScheduled = foodEval.scheduledAmount;
+      foodAllowanceNextDate = foodEval.nextCreditDate || foodAllowanceDate;
+    }
+
     const foodAllowance = Math.max(
       0,
       Number((foodAllowanceTotal - foodAllowanceUsed).toFixed(2)),
@@ -71,7 +96,12 @@ export class BalanceService {
       investments: Number(investments.toFixed(2)),
       foodAllowance: Number(foodAllowance.toFixed(2)),
       foodAllowanceTotal: Number(foodAllowanceTotal.toFixed(2)),
+      foodAllowanceConfigured: Number(foodAllowanceConfigured.toFixed(2)),
+      foodAllowanceScheduled: Number(foodAllowanceScheduled.toFixed(2)),
       foodAllowanceUsed: Number(foodAllowanceUsed.toFixed(2)),
+      foodAllowanceDate,
+      foodAllowanceRecurring,
+      foodAllowanceNextDate,
     };
   }
 
@@ -125,6 +155,8 @@ export class BalanceService {
         investments: acc.investments + m.investments,
         foodAllowance: acc.foodAllowance + m.foodAllowance,
         foodAllowanceTotal: acc.foodAllowanceTotal + m.foodAllowanceTotal,
+        foodAllowanceScheduled:
+          acc.foodAllowanceScheduled + m.foodAllowanceScheduled,
         foodAllowanceUsed: acc.foodAllowanceUsed + m.foodAllowanceUsed,
       }),
       {
@@ -136,6 +168,7 @@ export class BalanceService {
         investments: 0,
         foodAllowance: 0,
         foodAllowanceTotal: 0,
+        foodAllowanceScheduled: 0,
         foodAllowanceUsed: 0,
       },
     );
@@ -152,13 +185,19 @@ export class BalanceService {
       investments: Number(totals.investments.toFixed(2)),
       foodAllowance: Number(totals.foodAllowance.toFixed(2)),
       foodAllowanceTotal: Number(totals.foodAllowanceTotal.toFixed(2)),
+      foodAllowanceScheduled: Number(totals.foodAllowanceScheduled.toFixed(2)),
       foodAllowanceUsed: Number(totals.foodAllowanceUsed.toFixed(2)),
       ownBalance: selfMetrics?.balance ?? 0,
       ownEmergencyFund: selfMetrics?.emergencyFund ?? 0,
       ownInvestments: selfMetrics?.investments ?? 0,
       ownFoodAllowance: selfMetrics?.foodAllowance ?? 0,
       ownFoodAllowanceTotal: selfMetrics?.foodAllowanceTotal ?? 0,
+      ownFoodAllowanceConfigured: selfMetrics?.foodAllowanceConfigured ?? 0,
+      ownFoodAllowanceScheduled: selfMetrics?.foodAllowanceScheduled ?? 0,
       ownFoodAllowanceUsed: selfMetrics?.foodAllowanceUsed ?? 0,
+      ownFoodAllowanceDate: selfMetrics?.foodAllowanceDate ?? null,
+      ownFoodAllowanceRecurring: selfMetrics?.foodAllowanceRecurring ?? true,
+      ownFoodAllowanceNextDate: selfMetrics?.foodAllowanceNextDate ?? null,
       memberBreakdown,
     };
   }
@@ -211,7 +250,12 @@ export class BalanceService {
     return this.getBalance(userId, 'individual');
   }
 
-  async updateFoodAllowance(userId: string, amount: number) {
+  async updateFoodAllowance(
+    userId: string,
+    amount: number,
+    creditDate?: string,
+    isRecurring?: boolean,
+  ) {
     if (amount < 0) {
       throw new BadRequestException(
         'O valor do Vale Alimentação/Refeição não pode ser negativo.',
@@ -222,8 +266,14 @@ export class BalanceService {
       userId,
     );
     if (user) {
+      const todayIso = formatDateOnly(getTodayParts());
       await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
         foodAllowance: Number(amount),
+        foodAllowanceDate: creditDate || user.foodAllowanceDate || todayIso,
+        foodAllowanceRecurring:
+          isRecurring !== undefined
+            ? Boolean(isRecurring)
+            : (user.foodAllowanceRecurring ?? true),
         updatedAt: new Date().toISOString(),
       });
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');

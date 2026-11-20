@@ -47,6 +47,11 @@ export class BalanceController {
 
   @Post('food-allowance')
   updateFoodAllowance(@Request() req: any, @Body() dto: UpdateFoodAllowanceDto) {
-    return this.service.updateFoodAllowance(req.user.userId, dto.amount);
+    return this.service.updateFoodAllowance(
+      req.user.userId,
+      dto.amount,
+      dto.creditDate,
+      dto.isRecurring,
+    );
   }
 }
