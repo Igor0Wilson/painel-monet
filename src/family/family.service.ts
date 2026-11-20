@@ -391,6 +391,10 @@ export class FamilyService {
       (acc, u) => acc + Number(u.investments || 0),
       0,
     );
+    const foodSum = users.reduce(
+      (acc, u) => acc + Number(u.foodAllowance || 0),
+      0,
+    );
 
     const version = [
       groupId,
@@ -406,6 +410,7 @@ export class FamilyService {
       userMax,
       reserveSum.toFixed(2),
       invSum.toFixed(2),
+      foodSum.toFixed(2),
     ].join(':');
 
     return {

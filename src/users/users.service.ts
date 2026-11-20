@@ -117,6 +117,7 @@ export class UsersService {
       deactivatedAtMs: null,
       emergencyFund: 0,
       investments: 0,
+      foodAllowance: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -357,6 +358,8 @@ export class UsersService {
     });
 
     let totalPaidExpenses = 0;
+    let totalCashPaidExpenses = 0;
+    let totalFoodVoucherExpenses = 0;
     let totalPendingExpenses = 0;
     const expensesByCategory: Record<string, number> = {};
 
@@ -367,6 +370,11 @@ export class UsersService {
       const val = Number(exp.value || 0);
       if (exp.isPaid) {
         totalPaidExpenses += val;
+        if (exp.paymentMethod === 'va' || exp.paymentMethod === 'vr') {
+          totalFoodVoucherExpenses += val;
+        } else {
+          totalCashPaidExpenses += val;
+        }
       } else {
         totalPendingExpenses += val;
       }
@@ -395,10 +403,15 @@ export class UsersService {
 
     const emergencyFund = Number(user.emergencyFund || 0);
     const investments = Number(user.investments || 0);
+    const foodAllowanceTotal = Number(user.foodAllowance || 0);
+    const foodAllowanceRemaining = Math.max(
+      0,
+      Number((foodAllowanceTotal - totalFoodVoucherExpenses).toFixed(2)),
+    );
     const availableBalance = Number(
       (
         totalCreditedIncome -
-        totalPaidExpenses -
+        totalCashPaidExpenses -
         emergencyFund -
         investments
       ).toFixed(2),
@@ -436,6 +449,9 @@ export class UsersService {
         totalDespesasPendentes: Number(totalPendingExpenses.toFixed(2)),
         emergencyFund,
         investments,
+        valeAlimentacaoRefeicaoTotal: foodAllowanceTotal,
+        valeAlimentacaoRefeicaoUsado: Number(totalFoodVoucherExpenses.toFixed(2)),
+        valeAlimentacaoRefeicaoSaldo: foodAllowanceRemaining,
         gastosPorCategoria: expensesByCategory,
         totalCategories: categories.length,
         totalIncomes: formattedIncomes.length,

@@ -39,16 +39,28 @@ export class BalanceService {
       scheduledIncome += credit.scheduledAmount;
     }
 
-    const totalExpenses = userExpenses.reduce((acc, curr) => {
-      if (curr.isPaid && curr.paymentMethod !== 'credito') {
-        return acc + Number(curr.value);
-      }
-      return acc;
-    }, 0);
+    let cashExpenses = 0;
+    let foodAllowanceUsed = 0;
 
+    for (const curr of userExpenses) {
+      if (!curr.isPaid || curr.paymentMethod === 'credito') continue;
+      const val = Number(curr.value);
+      if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
+        foodAllowanceUsed += val;
+      } else {
+        cashExpenses += val;
+      }
+    }
+
+    const totalExpenses = cashExpenses + foodAllowanceUsed;
     const emergencyFund = Number(user.emergencyFund || 0);
     const investments = Number(user.investments || 0);
-    const balance = totalIncome - totalExpenses - emergencyFund - investments;
+    const foodAllowanceTotal = Number(user.foodAllowance || 0);
+    const foodAllowance = Math.max(
+      0,
+      Number((foodAllowanceTotal - foodAllowanceUsed).toFixed(2)),
+    );
+    const balance = totalIncome - cashExpenses - emergencyFund - investments;
 
     return {
       balance: Number(balance.toFixed(2)),
@@ -57,6 +69,9 @@ export class BalanceService {
       totalExpenses: Number(totalExpenses.toFixed(2)),
       emergencyFund: Number(emergencyFund.toFixed(2)),
       investments: Number(investments.toFixed(2)),
+      foodAllowance: Number(foodAllowance.toFixed(2)),
+      foodAllowanceTotal: Number(foodAllowanceTotal.toFixed(2)),
+      foodAllowanceUsed: Number(foodAllowanceUsed.toFixed(2)),
     };
   }
 
@@ -108,6 +123,9 @@ export class BalanceService {
         totalExpenses: acc.totalExpenses + m.totalExpenses,
         emergencyFund: acc.emergencyFund + m.emergencyFund,
         investments: acc.investments + m.investments,
+        foodAllowance: acc.foodAllowance + m.foodAllowance,
+        foodAllowanceTotal: acc.foodAllowanceTotal + m.foodAllowanceTotal,
+        foodAllowanceUsed: acc.foodAllowanceUsed + m.foodAllowanceUsed,
       }),
       {
         balance: 0,
@@ -116,6 +134,9 @@ export class BalanceService {
         totalExpenses: 0,
         emergencyFund: 0,
         investments: 0,
+        foodAllowance: 0,
+        foodAllowanceTotal: 0,
+        foodAllowanceUsed: 0,
       },
     );
 
@@ -129,9 +150,15 @@ export class BalanceService {
       totalExpenses: Number(totals.totalExpenses.toFixed(2)),
       emergencyFund: Number(totals.emergencyFund.toFixed(2)),
       investments: Number(totals.investments.toFixed(2)),
+      foodAllowance: Number(totals.foodAllowance.toFixed(2)),
+      foodAllowanceTotal: Number(totals.foodAllowanceTotal.toFixed(2)),
+      foodAllowanceUsed: Number(totals.foodAllowanceUsed.toFixed(2)),
       ownBalance: selfMetrics?.balance ?? 0,
       ownEmergencyFund: selfMetrics?.emergencyFund ?? 0,
       ownInvestments: selfMetrics?.investments ?? 0,
+      ownFoodAllowance: selfMetrics?.foodAllowance ?? 0,
+      ownFoodAllowanceTotal: selfMetrics?.foodAllowanceTotal ?? 0,
+      ownFoodAllowanceUsed: selfMetrics?.foodAllowanceUsed ?? 0,
       memberBreakdown,
     };
   }
@@ -177,6 +204,26 @@ export class BalanceService {
       }
       await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
         investments: Number(amount),
+        updatedAt: new Date().toISOString(),
+      });
+      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    }
+    return this.getBalance(userId, 'individual');
+  }
+
+  async updateFoodAllowance(userId: string, amount: number) {
+    if (amount < 0) {
+      throw new BadRequestException(
+        'O valor do Vale Alimentação/Refeição não pode ser negativo.',
+      );
+    }
+    const user = await this.firebase.findById<UserDoc>(
+      COLLECTIONS.USERS,
+      userId,
+    );
+    if (user) {
+      await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+        foodAllowance: Number(amount),
         updatedAt: new Date().toISOString(),
       });
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');

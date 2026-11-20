@@ -10,6 +10,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BalanceService } from './balance.service';
 import { UpdateEmergencyFundDto } from './dto/update-emergency-fund.dto';
+import { UpdateFoodAllowanceDto } from './dto/update-food-allowance.dto';
 import { UpdateInvestmentsDto } from './dto/update-investments.dto';
 
 @UseGuards(JwtAuthGuard)
@@ -42,5 +43,10 @@ export class BalanceController {
   @Post('investments')
   updateInvestments(@Request() req: any, @Body() dto: UpdateInvestmentsDto) {
     return this.service.updateInvestments(req.user.userId, dto.amount);
+  }
+
+  @Post('food-allowance')
+  updateFoodAllowance(@Request() req: any, @Body() dto: UpdateFoodAllowanceDto) {
+    return this.service.updateFoodAllowance(req.user.userId, dto.amount);
   }
 }

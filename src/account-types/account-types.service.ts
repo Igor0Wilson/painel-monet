@@ -10,6 +10,7 @@ export const DEFAULT_ACCOUNT_TYPES = [
   'Lazer',
   'Alimentação',
   'FastFood',
+  'Saúde e Beleza',
   'Diversos',
 ];
 
@@ -69,6 +70,20 @@ export function normalizeOfficialCategory(rawName?: string | null): string {
     norm.includes('restaurante')
   ) {
     return 'Alimentação';
+  }
+  if (
+    norm.includes('saude') ||
+    norm.includes('beleza') ||
+    norm.includes('farmacia') ||
+    norm.includes('medico') ||
+    norm.includes('dentista') ||
+    norm.includes('academia') ||
+    norm.includes('estetica') ||
+    norm.includes('salao') ||
+    norm.includes('barbearia') ||
+    norm.includes('cosmetico')
+  ) {
+    return 'Saúde e Beleza';
   }
   return 'Diversos';
 }

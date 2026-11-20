@@ -50,7 +50,7 @@ export class CreateExpenseDto {
   isCreditCard?: boolean;
 
   @IsOptional()
-  @IsIn(['dinheiro', 'pix', 'debito', 'credito'])
+  @IsIn(['dinheiro', 'pix', 'debito', 'credito', 'va', 'vr'])
   paymentMethod?: PaymentMethod;
 
   @IsOptional()

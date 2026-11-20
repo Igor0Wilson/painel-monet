@@ -7,12 +7,12 @@ import {
   Min,
 } from 'class-validator';
 
-export type PaymentMethod = 'dinheiro' | 'pix' | 'debito' | 'credito';
+export type PaymentMethod = 'dinheiro' | 'pix' | 'debito' | 'credito' | 'va' | 'vr';
 
 export class PayExpenseDto {
   @IsOptional()
-  @IsIn(['dinheiro', 'pix', 'debito', 'credito'], {
-    message: 'Forma de pagamento inválida. Use: dinheiro, pix, debito ou credito.',
+  @IsIn(['dinheiro', 'pix', 'debito', 'credito', 'va', 'vr'], {
+    message: 'Forma de pagamento inválida. Use: dinheiro, pix, debito, credito, va ou vr.',
   })
   paymentMethod?: PaymentMethod;
 
