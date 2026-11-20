@@ -20,7 +20,16 @@ function getAllowedOrigins(): string[] {
         'http://127.0.0.1:3001',
       ];
 
-  return Array.from(new Set([...configuredOrigins, ...devOrigins]));
+  const mobileWebViewOrigins = [
+    'capacitor://localhost',
+    'ionic://localhost',
+    'http://localhost',
+    'https://localhost',
+  ];
+
+  return Array.from(
+    new Set([...configuredOrigins, ...devOrigins, ...mobileWebViewOrigins]),
+  );
 }
 
 export function configureApp(app: INestApplication): void {
