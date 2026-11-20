@@ -6,6 +6,7 @@ import {
   NotFoundException,
   Patch,
   Post,
+  Query,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -50,8 +51,8 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get('me/export')
-  async exportData(@Request() req: any) {
-    return this.usersService.exportAccountData(req.user.userId);
+  async exportData(@Request() req: any, @Query('cpf') cpf?: string) {
+    return this.usersService.exportAccountData(req.user.userId, cpf);
   }
 
   @UseGuards(JwtAuthGuard)

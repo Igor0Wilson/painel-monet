@@ -19,6 +19,13 @@ import {
 } from 'firebase-admin/firestore';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  decryptDocumentFromStorage,
+  encryptDocumentForStorage,
+  encryptFieldValue,
+  hasUnencryptedSensitiveFields,
+  isEncryptedCollectionField,
+} from '../common/data-crypto.utils';
 import { COLLECTIONS, UserDoc } from './firebase.types';
 
 export interface VerifiedFirebaseToken {
@@ -174,11 +181,27 @@ export class FirebaseService implements OnModuleInit {
     return this.db.collection(name);
   }
 
+  private migrateIfUnencrypted(
+    collectionName: string,
+    rawDoc: Record<string, any> | undefined,
+  ): void {
+    if (!rawDoc || !rawDoc.id) return;
+    if (hasUnencryptedSensitiveFields(collectionName, rawDoc)) {
+      const encrypted = encryptDocumentForStorage(collectionName, rawDoc);
+      this.collection(collectionName)
+        .doc(rawDoc.id)
+        .set(encrypted, { merge: true })
+        .catch(() => undefined);
+    }
+  }
+
   async findById<T>(collectionName: string, id: string): Promise<T | null> {
     if (!id) return null;
     const snap = await this.collection(collectionName).doc(id).get();
     if (!snap.exists) return null;
-    return snap.data() as T;
+    const raw = snap.data() as Record<string, any>;
+    this.migrateIfUnencrypted(collectionName, raw);
+    return decryptDocumentFromStorage(collectionName, raw) as T;
   }
 
   async findByField<T>(
@@ -186,10 +209,40 @@ export class FirebaseService implements OnModuleInit {
     field: string,
     value: string | boolean | number,
   ): Promise<T[]> {
+    if (
+      isEncryptedCollectionField(collectionName, field) &&
+      (typeof value === 'string' || typeof value === 'number')
+    ) {
+      const encryptedVal = encryptFieldValue(collectionName, field, value);
+      const [encSnap, plainSnap] = await Promise.all([
+        this.collection(collectionName).where(field, '==', encryptedVal).get(),
+        this.collection(collectionName).where(field, '==', value).get(),
+      ]);
+
+      const byId = new Map<string, Record<string, any>>();
+      encSnap.docs.forEach((doc) => {
+        const data = doc.data() as Record<string, any>;
+        byId.set(data.id || doc.id, data);
+      });
+      plainSnap.docs.forEach((doc) => {
+        const data = doc.data() as Record<string, any>;
+        this.migrateIfUnencrypted(collectionName, data);
+        byId.set(data.id || doc.id, data);
+      });
+
+      return Array.from(byId.values()).map(
+        (raw) => decryptDocumentFromStorage(collectionName, raw) as T,
+      );
+    }
+
     const snap = await this.collection(collectionName)
       .where(field, '==', value)
       .get();
-    return snap.docs.map((doc) => doc.data() as T);
+    return snap.docs.map((doc) => {
+      const raw = doc.data() as Record<string, any>;
+      this.migrateIfUnencrypted(collectionName, raw);
+      return decryptDocumentFromStorage(collectionName, raw) as T;
+    });
   }
 
   async findOneByField<T>(
@@ -197,12 +250,29 @@ export class FirebaseService implements OnModuleInit {
     field: string,
     value: string | boolean | number,
   ): Promise<T | null> {
+    if (
+      isEncryptedCollectionField(collectionName, field) &&
+      (typeof value === 'string' || typeof value === 'number')
+    ) {
+      const encryptedVal = encryptFieldValue(collectionName, field, value);
+      const encSnap = await this.collection(collectionName)
+        .where(field, '==', encryptedVal)
+        .limit(1)
+        .get();
+      if (!encSnap.empty) {
+        const raw = encSnap.docs[0].data() as Record<string, any>;
+        return decryptDocumentFromStorage(collectionName, raw) as T;
+      }
+    }
+
     const snap = await this.collection(collectionName)
       .where(field, '==', value)
       .limit(1)
       .get();
     if (snap.empty) return null;
-    return snap.docs[0].data() as T;
+    const raw = snap.docs[0].data() as Record<string, any>;
+    this.migrateIfUnencrypted(collectionName, raw);
+    return decryptDocumentFromStorage(collectionName, raw) as T;
   }
 
   async findByFieldIn<T>(
@@ -222,7 +292,11 @@ export class FirebaseService implements OnModuleInit {
       const snap = await this.collection(collectionName)
         .where(field, 'in', chunk)
         .get();
-      snap.docs.forEach((doc) => results.push(doc.data() as T));
+      snap.docs.forEach((doc) => {
+        const raw = doc.data() as Record<string, any>;
+        this.migrateIfUnencrypted(collectionName, raw);
+        results.push(decryptDocumentFromStorage(collectionName, raw) as T);
+      });
     }
     return results;
   }
@@ -231,8 +305,12 @@ export class FirebaseService implements OnModuleInit {
     collectionName: string,
     doc: T,
   ): Promise<T> {
-    await this.collection(collectionName).doc(doc.id).set(doc);
-    return doc;
+    const encryptedDoc = encryptDocumentForStorage(
+      collectionName,
+      doc as Record<string, any>,
+    );
+    await this.collection(collectionName).doc(doc.id).set(encryptedDoc);
+    return decryptDocumentFromStorage(collectionName, encryptedDoc) as T;
   }
 
   async updateDoc(
@@ -240,7 +318,15 @@ export class FirebaseService implements OnModuleInit {
     id: string,
     data: Record<string, any>,
   ): Promise<void> {
-    await this.collection(collectionName).doc(id).update(data);
+    const encryptedData: Record<string, any> = encryptDocumentForStorage(
+      collectionName,
+      {
+        ...data,
+        id,
+      },
+    );
+    delete encryptedData.id;
+    await this.collection(collectionName).doc(id).update(encryptedData);
   }
 
   async deleteDoc(collectionName: string, id: string): Promise<void> {
@@ -593,7 +679,11 @@ export class FirebaseService implements OnModuleInit {
       if (cpfLockRef) {
         tx.set(cpfLockRef, { userId: user.id, updatedAt: now });
       }
-      tx.set(userRef, user);
+      const encryptedUser = encryptDocumentForStorage(
+        COLLECTIONS.USERS,
+        user as unknown as Record<string, any>,
+      );
+      tx.set(userRef, encryptedUser);
     });
 
     return user;
@@ -666,7 +756,12 @@ export class FirebaseService implements OnModuleInit {
       if (newCpfLockRef) {
         tx.set(newCpfLockRef, { userId, updatedAt: now });
       }
-      tx.update(userRef, updateData as Record<string, any>);
+      const encryptedUpdate = encryptDocumentForStorage(COLLECTIONS.USERS, {
+        ...updateData,
+        id: userId,
+      } as Record<string, any>);
+      delete encryptedUpdate.id;
+      tx.update(userRef, encryptedUpdate);
     });
 
     return { ...currentUser, ...updateData };

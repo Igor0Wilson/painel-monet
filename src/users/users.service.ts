@@ -1,12 +1,20 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { randomBytes, randomUUID as uuidv4 } from 'crypto';
-import { isValidCpf, normalizeCpf, normalizePhone } from '../common/cpf.utils';
+import { createHash, randomBytes, randomUUID as uuidv4 } from 'crypto';
+import { normalizeOfficialCategory } from '../account-types/account-types.service';
+import {
+  isValidCpf,
+  maskCpf,
+  normalizeCpf,
+  normalizePhone,
+} from '../common/cpf.utils';
+import { computeDeterministicHash } from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   AccountTypeDoc,
@@ -17,6 +25,7 @@ import {
   IncomeDoc,
   UserDoc,
 } from '../firebase/firebase.types';
+import { evaluateIncomeCredit, getTodayParts } from '../income/income.date-utils';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
 export interface RegisterFirebaseUserParams {
@@ -267,46 +276,174 @@ export class UsersService {
     return updated;
   }
 
-  async exportAccountData(userId: string) {
-    const user = await this.findById(userId);
-    if (!user) throw new NotFoundException('Usuário não encontrado');
+  async exportAccountData(userId: string, requestedCpf?: string) {
+    if (!userId) {
+      throw new ForbiddenException('Identificador de usuário ausente.');
+    }
 
-    const [categories, incomes, expenses] = await Promise.all([
+    const user = await this.findById(userId);
+    if (!user || user.id !== userId) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+
+    const userCpf = normalizeCpf(user.cpf || '');
+    if (!userCpf || !isValidCpf(userCpf)) {
+      throw new BadRequestException(
+        'Cadastre um CPF válido no seu perfil para baixar o relatório vinculado ao seu CPF + ID.',
+      );
+    }
+
+    if (requestedCpf && requestedCpf.trim()) {
+      const normalizedRequested = normalizeCpf(requestedCpf);
+      if (normalizedRequested && normalizedRequested !== userCpf) {
+        throw new ForbiddenException(
+          'Bloqueio de segurança: o CPF informado não corresponde ao CPF vinculado ao seu ID.',
+        );
+      }
+    }
+
+    const cpfLockId = createHash('sha256')
+      .update(userCpf.trim().toLowerCase())
+      .digest('hex');
+    const cpfLock = await this.firebase.findById<{ userId: string }>(
+      COLLECTIONS.CPF_LOCKS,
+      cpfLockId,
+    );
+    if (cpfLock && cpfLock.userId && cpfLock.userId !== user.id) {
+      throw new ForbiddenException(
+        'Bloqueio de segurança: vínculo CPF + ID inválido.',
+      );
+    }
+
+    const [rawCategories, rawIncomes, rawExpenses] = await Promise.all([
       this.firebase.findByField<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
         'userId',
-        userId,
+        user.id,
       ),
-      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
+      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', user.id),
       this.firebase.findByField<ExpenseDoc>(
         COLLECTIONS.EXPENSES,
         'userId',
-        userId,
+        user.id,
       ),
     ]);
 
+    // Dupla trava em memória: garante que 100% dos registros pertencem exclusivamente a este user.id
+    const categories = rawCategories.filter((c) => c.userId === user.id);
+    const incomes = rawIncomes.filter((i) => i.userId === user.id);
+    const expenses = rawExpenses.filter((e) => e.userId === user.id);
+
+    const typesById = new Map(categories.map((c) => [c.id, c]));
+    const today = getTodayParts();
+
+    let totalCreditedIncome = 0;
+    let totalScheduledIncome = 0;
+    const formattedIncomes = incomes.map((inc) => {
+      const credit = evaluateIncomeCredit(inc, today);
+      totalCreditedIncome += credit.creditedAmount;
+      totalScheduledIncome += credit.scheduledAmount;
+      return {
+        id: inc.id,
+        userId: user.id,
+        ownerCpfMasked: maskCpf(userCpf),
+        name: inc.name,
+        value: Number(inc.value || 0),
+        incomeDate: inc.incomeDate,
+        isRecurring: Boolean(inc.isRecurring),
+        creditedAmount: Number(credit.creditedAmount.toFixed(2)),
+        scheduledAmount: Number(credit.scheduledAmount.toFixed(2)),
+      };
+    });
+
+    let totalPaidExpenses = 0;
+    let totalPendingExpenses = 0;
+    const expensesByCategory: Record<string, number> = {};
+
+    const formattedExpenses = expenses.map((exp) => {
+      if (exp.paymentMethod === 'credito' && !exp.isCreditCard) {
+        return null;
+      }
+      const val = Number(exp.value || 0);
+      if (exp.isPaid) {
+        totalPaidExpenses += val;
+      } else {
+        totalPendingExpenses += val;
+      }
+      const catName = normalizeOfficialCategory(
+        typesById.get(exp.accountTypeId)?.name,
+      );
+      expensesByCategory[catName] = Number(
+        ((expensesByCategory[catName] || 0) + val).toFixed(2),
+      );
+      return {
+        id: exp.id,
+        userId: user.id,
+        ownerCpfMasked: maskCpf(userCpf),
+        name: exp.name,
+        category: catName,
+        value: val,
+        dueDate: exp.dueDate,
+        isPaid: Boolean(exp.isPaid),
+        paymentMethod: exp.paymentMethod || null,
+        isRecurring: Boolean(exp.isRecurring),
+        isInstallment: Boolean(exp.isInstallment),
+        installmentNumber: exp.installmentNumber || null,
+        installmentCount: exp.installmentCount || null,
+      };
+    }).filter(Boolean);
+
+    const emergencyFund = Number(user.emergencyFund || 0);
+    const investments = Number(user.investments || 0);
+    const availableBalance = Number(
+      (
+        totalCreditedIncome -
+        totalPaidExpenses -
+        emergencyFund -
+        investments
+      ).toFixed(2),
+    );
+
+    const ownershipSignature = computeDeterministicHash(
+      `export:${user.id}:${userCpf}`,
+    );
+
     return {
       exportedAt: new Date().toISOString(),
-      application: 'Painel Monet',
+      application: 'Finanças',
+      securityVerification: {
+        verifiedBy: 'CPF_AND_USER_ID',
+        userId: user.id,
+        cpf: userCpf,
+        maskedCpf: maskCpf(userCpf),
+        ownershipSignature,
+      },
       profile: {
         id: user.id,
         name: user.name,
         email: user.email,
-        cpf: user.cpf,
+        cpf: userCpf,
+        maskedCpf: maskCpf(userCpf),
         phone: user.phone,
         authProvider: user.authProvider || 'password',
         createdAt: user.createdAt,
       },
       summary: {
-        emergencyFund: Number(user.emergencyFund || 0),
-        investments: Number(user.investments || 0),
+        patrimonioDisponivel: availableBalance,
+        totalReceitasCreditadas: Number(totalCreditedIncome.toFixed(2)),
+        totalReceitasAgendadas: Number(totalScheduledIncome.toFixed(2)),
+        totalDespesasPagas: Number(totalPaidExpenses.toFixed(2)),
+        totalDespesasPendentes: Number(totalPendingExpenses.toFixed(2)),
+        emergencyFund,
+        investments,
+        gastosPorCategoria: expensesByCategory,
         totalCategories: categories.length,
-        totalIncomes: incomes.length,
-        totalExpenses: expenses.length,
+        totalIncomes: formattedIncomes.length,
+        totalExpenses: formattedExpenses.length,
       },
       categories,
-      incomes,
-      expenses,
+      incomes: formattedIncomes,
+      expenses: formattedExpenses,
     };
   }
 
