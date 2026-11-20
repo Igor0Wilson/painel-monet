@@ -7,11 +7,13 @@ import { JwtService } from '@nestjs/jwt';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
+import { EmailSenderService } from './email-sender.service';
 
 describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
   let firebase: InMemoryFirebaseService;
   let usersService: UsersService;
   let jwtService: JwtService;
+  let emailSender: EmailSenderService;
   let authService: AuthService;
 
   beforeEach(() => {
@@ -21,7 +23,13 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
       secret: 'test-jwt-secret-key-32-chars-minimum',
       signOptions: { algorithm: 'HS256', expiresIn: '1h' },
     });
-    authService = new AuthService(usersService, jwtService, firebase as any);
+    emailSender = new EmailSenderService();
+    authService = new AuthService(
+      usersService,
+      jwtService,
+      firebase as any,
+      emailSender,
+    );
   });
 
   it('rejects password login when user exists in Firebase Auth but not in our database', async () => {

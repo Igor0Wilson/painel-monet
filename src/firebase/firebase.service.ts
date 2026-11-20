@@ -518,6 +518,47 @@ export class FirebaseService implements OnModuleInit {
     }
   }
 
+  async generateFirebasePasswordResetLink(
+    email: string,
+    continueUrl?: string,
+  ): Promise<string> {
+    const token = await this.getAdminAccessToken();
+    const payload: Record<string, any> = {
+      requestType: 'PASSWORD_RESET',
+      email: email.trim().toLowerCase(),
+      returnOobLink: true,
+    };
+    if (continueUrl) {
+      payload.continueUrl = continueUrl;
+    }
+
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${this.resolvedProjectId}/accounts:sendOobCode`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `Falha ao gerar link oficial do Firebase (${response.status}): ${errText}`,
+      );
+    }
+
+    const data = (await response.json()) as { oobLink?: string };
+    if (!data.oobLink) {
+      throw new Error('Firebase não retornou o link de redefinição de senha.');
+    }
+
+    return data.oobLink;
+  }
+
   async createUserWithAtomicLocks(user: UserDoc): Promise<UserDoc> {
     const db = this.db;
     const emailLockRef = db

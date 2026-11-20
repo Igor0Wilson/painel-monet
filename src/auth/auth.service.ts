@@ -11,6 +11,12 @@ import { UserDoc } from '../firebase/firebase.types';
 import { UsersService } from '../users/users.service';
 import { FirebaseRegisterDto } from './dto/firebase-register.dto';
 import { GoogleCompleteDto } from './dto/google-complete.dto';
+import { EmailSenderService } from './email-sender.service';
+import {
+  buildPasswordResetEmailHtml,
+  buildPasswordResetEmailSubject,
+  buildPasswordResetEmailText,
+} from './email-template';
 
 interface GoogleCompletionPayload {
   purpose: string;
@@ -27,6 +33,7 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly firebase: FirebaseService,
+    private readonly emailSender: EmailSenderService,
   ) {}
 
   private buildAuthResponse(user: UserDoc) {
@@ -63,15 +70,35 @@ export class AuthService {
     return null;
   }
 
-  private getFrontendContinueUrl(mode: 'reset' | 'reactivate'): string | undefined {
-    const firstOrigin = (process.env.FRONTEND_URL || '')
+  private getFrontendOrigin(): string | undefined {
+    return (process.env.FRONTEND_URL || '')
       .split(',')
       .map((item) => item.trim().replace(/\/+$/, ''))
       .find(Boolean);
+  }
+
+  private getFrontendContinueUrl(mode: 'reset' | 'reactivate'): string | undefined {
+    const firstOrigin = this.getFrontendOrigin();
     if (!firstOrigin) return undefined;
     return mode === 'reactivate'
       ? `${firstOrigin}/login?reactivated=1`
       : `${firstOrigin}/login?passwordReset=1`;
+  }
+
+  private buildBrandedActionUrl(
+    firebaseOobLink: string,
+    mode: 'reset' | 'reactivate',
+  ): string {
+    const origin = this.getFrontendOrigin();
+    if (!origin) return firebaseOobLink;
+    try {
+      const parsed = new URL(firebaseOobLink);
+      const oobCode = parsed.searchParams.get('oobCode');
+      if (!oobCode) return firebaseOobLink;
+      return `${origin}/auth/action?mode=resetPassword&oobCode=${encodeURIComponent(oobCode)}&intent=${mode}`;
+    } catch {
+      return firebaseOobLink;
+    }
   }
 
   async loginWithFirebase(idToken: string) {
@@ -284,15 +311,65 @@ export class AuthService {
       user.isActive === false ? 'reactivate' : mode;
     const continueUrl = this.getFrontendContinueUrl(effectiveMode);
 
-    await this.firebase.sendFirebasePasswordResetEmail(user.email, continueUrl);
+    let sentCustomHtml = false;
+    if (this.emailSender.hasCustomProvider()) {
+      try {
+        const firebaseOobLink =
+          await this.firebase.generateFirebasePasswordResetLink(
+            user.email,
+            continueUrl,
+          );
+        const actionUrl = this.buildBrandedActionUrl(
+          firebaseOobLink,
+          effectiveMode,
+        );
+        const origin = this.getFrontendOrigin();
+        const logoUrl = origin ? `${origin}/logo192.png` : undefined;
+
+        const html = buildPasswordResetEmailHtml({
+          userName: user.name,
+          actionUrl,
+          mode: effectiveMode,
+          logoUrl,
+        });
+        const text = buildPasswordResetEmailText({
+          userName: user.name,
+          actionUrl,
+          mode: effectiveMode,
+          logoUrl,
+        });
+        const subject = buildPasswordResetEmailSubject(effectiveMode);
+
+        const result = await this.emailSender.sendHtmlEmail({
+          toEmail: user.email,
+          toName: user.name,
+          subject,
+          html,
+          text,
+        });
+        sentCustomHtml = result.sent;
+      } catch (error) {
+        this.logger.warn(
+          `Fallback para e-mail nativo do Firebase: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (!sentCustomHtml) {
+      await this.firebase.sendFirebasePasswordResetEmail(
+        user.email,
+        continueUrl,
+      );
+    }
 
     return {
       message:
         effectiveMode === 'reactivate'
-          ? 'Enviamos um e-mail oficial do Firebase com o botão/link para definir sua nova senha e reativar sua conta.'
-          : 'Enviamos um e-mail oficial do Firebase com o link para redefinir sua senha.',
+          ? 'Enviamos um e-mail com o botão para definir sua nova senha e reativar sua conta.'
+          : 'Enviamos um e-mail com o botão/link para redefinir sua senha.',
       maskedEmail: this.maskEmail(user.email),
       isDeactivated: user.isActive === false,
+      customTemplate: sentCustomHtml,
     };
   }
 }

@@ -146,6 +146,13 @@ export class InMemoryFirebaseService {
     this.sentResetEmails.push({ email, continueUrl });
   }
 
+  async generateFirebasePasswordResetLink(
+    email: string,
+    _continueUrl?: string,
+  ): Promise<string> {
+    return `https://painel-monet.firebaseapp.com/__/auth/action?mode=resetPassword&oobCode=mock-code-${encodeURIComponent(email)}`;
+  }
+
   async createUserWithAtomicLocks(user: UserDoc): Promise<UserDoc> {
     const emailLocks = this.getCollection(COLLECTIONS.EMAIL_LOCKS);
     const cpfLocks = this.getCollection(COLLECTIONS.CPF_LOCKS);
