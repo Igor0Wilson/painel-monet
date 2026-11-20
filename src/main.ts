@@ -12,7 +12,11 @@ async function bootstrap() {
     const port = Number(process.env.PORT) || 3000;
     const host = process.env.HOST || '127.0.0.1';
 
-    await app.listen(port, host);
+    if (process.env.VERCEL) {
+      await app.listen(port);
+    } else {
+      await app.listen(port, host);
+    }
     logger.log(`Servidor rodando em http://${host}:${port}`);
   } catch (error) {
     logger.error(
