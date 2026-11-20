@@ -212,7 +212,7 @@ describe('BalanceService (Firestore)', () => {
     const oct = await service.getChartData('u-1', '2026-10', 'individual');
 
     expect(oct.month).toBe('2026-10');
-    expect(oct.expensesByCategory).toEqual([{ name: 'Fast Food', value: 200 }]);
+    expect(oct.expensesByCategory).toEqual([{ name: 'FastFood', value: 200 }]);
     expect(oct.monthSummary.totalIncome).toBe(1500);
     expect(oct.monthSummary.totalExpenses).toBe(200);
     expect(oct.monthSummary.netFlow).toBe(1300);

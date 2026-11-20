@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { normalizeOfficialCategory } from '../account-types/account-types.service';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
@@ -247,25 +248,36 @@ export class BalanceService {
     const categoryMap = new Map<string, number>();
     let monthTotalExpenses = 0;
     const dailyExpenseMap = new Map<number, number>();
+    const targetMonthIdx = year * 12 + (monthNum - 1);
 
     expenses.forEach((e) => {
-      if (!e.isPaid || e.paymentMethod === 'credito') return;
+      if (e.paymentMethod === 'credito' && !e.isCreditCard) return;
       const d = parseDateOnly(e.dueDate);
-      if (d.year !== year || d.month !== monthNum) return;
+      const expMonthIdx = d.year * 12 + (d.month - 1);
+
+      const isSameMonth = d.year === year && d.month === monthNum;
+      const isRecurringInMonth =
+        Boolean(e.isRecurring) && targetMonthIdx >= expMonthIdx;
+
+      if (!isSameMonth && !isRecurringInMonth) return;
 
       const val = Number(e.value);
-      monthTotalExpenses += val;
-      const catName = typesById.get(e.accountTypeId)?.name || 'Outros';
+      const rawCatName = typesById.get(e.accountTypeId)?.name;
+      const catName = normalizeOfficialCategory(rawCatName);
       categoryMap.set(catName, (categoryMap.get(catName) || 0) + val);
-      dailyExpenseMap.set(d.day, (dailyExpenseMap.get(d.day) || 0) + val);
+
+      if (e.isPaid && isSameMonth) {
+        monthTotalExpenses += val;
+        dailyExpenseMap.set(d.day, (dailyExpenseMap.get(d.day) || 0) + val);
+      }
     });
 
-    const expensesByCategory = Array.from(categoryMap.entries()).map(
-      ([name, value]) => ({
+    const expensesByCategory = Array.from(categoryMap.entries())
+      .map(([name, value]) => ({
         name,
         value: Number(value.toFixed(2)),
-      }),
-    );
+      }))
+      .sort((a, b) => b.value - a.value);
 
     const dailyIncomeMap = new Map<number, number>();
     let monthTotalIncome = 0;

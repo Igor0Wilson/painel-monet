@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID as uuidv4 } from 'crypto';
+import { normalizeOfficialCategory } from '../account-types/account-types.service';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
@@ -181,11 +182,15 @@ export class ExpensesService {
       .map((e) => {
         const accountType = typesById.get(e.accountTypeId) || null;
         const owner = authScope.userMap.get(e.userId);
+        const normalizedCategoryName = normalizeOfficialCategory(
+          accountType?.name,
+        );
         return {
           ...e,
-          accountType: accountType
-            ? { id: accountType.id, name: accountType.name }
-            : null,
+          accountType: {
+            id: accountType?.id || e.accountTypeId || 'diversos',
+            name: normalizedCategoryName,
+          },
           isCreditCard:
             Boolean(e.isCreditCard) ||
             isCreditCardCategoryName(accountType?.name),

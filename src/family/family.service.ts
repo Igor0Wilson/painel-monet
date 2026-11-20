@@ -5,8 +5,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID as uuidv4 } from 'crypto';
+import {
+  buildFamilyInviteEmailHtml,
+  buildFamilyInviteEmailSubject,
+  buildFamilyInviteEmailText,
+} from '../auth/email-template';
+import { EmailSenderService } from '../auth/email-sender.service';
 import { isValidCpf, maskCpf, normalizeCpf } from '../common/cpf.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
@@ -37,6 +44,7 @@ export class FamilyService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly eventsService: FamilyEventsService,
+    @Optional() private readonly emailSender?: EmailSenderService,
   ) {}
 
   async resolveAuthorizedScope(
@@ -534,11 +542,57 @@ export class FamilyService {
 
     this.eventsService.emitToUsers([invitee.id, inviter.id], 'invite_received');
 
+    let emailSent = false;
+    if (this.emailSender && invitee.email) {
+      try {
+        const frontendBase = (
+          process.env.FRONTEND_URL?.split(',')[0] ||
+          'https://painel-monet-front.vercel.app'
+        )
+          .trim()
+          .replace(/\/+$/, '');
+        const actionUrl = `${frontendBase}/dashboard`;
+        const logoUrl = `${frontendBase}/logo192.png?v=4`;
+        const groupName = `Família de ${inviter.name.split(' ')[0]}`;
+        const maskedInviterCpf = maskCpf(inviter.cpf);
+
+        const emailRes = await this.emailSender.sendHtmlEmail({
+          toEmail: invitee.email,
+          toName: invitee.name,
+          subject: buildFamilyInviteEmailSubject(inviter.name),
+          html: buildFamilyInviteEmailHtml({
+            inviteeName: invitee.name,
+            inviterName: inviter.name,
+            inviterMaskedCpf: maskedInviterCpf,
+            groupName,
+            actionUrl,
+            logoUrl,
+          }),
+          text: buildFamilyInviteEmailText({
+            inviteeName: invitee.name,
+            inviterName: inviter.name,
+            inviterMaskedCpf: maskedInviterCpf,
+            groupName,
+            actionUrl,
+            logoUrl,
+          }),
+        });
+        emailSent = emailRes.sent;
+      } catch (err) {
+        this.logger.warn(
+          `Não foi possível enviar e-mail de notificação de convite família para ${invitee.email}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     return {
       id: invite.id,
       inviteeName: invitee.name,
       inviteeMaskedCpf: maskCpf(invitee.cpf),
-      message: `Convite enviado para ${invitee.name}. Aguardando confirmação dupla.`,
+      emailSent,
+      message: `Convite enviado para ${invitee.name}. Notificação disparada e aguardando confirmação dupla.`,
     };
   }
 
