@@ -159,5 +159,43 @@ describe('FamilyService (Firestore)', () => {
         ConflictException,
       );
     });
+
+    it('updates per-member privacy settings and restores fullAccessAll cleanly', async () => {
+      const invite = await service.inviteByCpf('u-1', cpfB);
+      await service.acceptInvite('u-2', invite.id, true);
+
+      const updatedStatus = await service.updatePrivacy('u-1', {
+        fullAccessAll: false,
+        rules: [
+          {
+            targetUserId: 'u-2',
+            viewBalance: true,
+            viewIncome: false,
+            viewExpenses: false,
+            viewInvestments: true,
+            viewEmergencyFund: false,
+            viewFoodAllowance: true,
+          },
+        ],
+      });
+
+      expect(updatedStatus.myPrivacy.fullAccessAll).toBe(false);
+      expect(updatedStatus.myPrivacy.rules[0].viewIncome).toBe(false);
+      expect(updatedStatus.myPrivacy.rules[0].viewInvestments).toBe(true);
+
+      const scopeForB = await service.resolveAuthorizedScope('u-2', 'family');
+      expect(scopeForB.memberPermissions?.get('u-1')).toEqual({
+        viewBalance: true,
+        viewIncome: false,
+        viewExpenses: false,
+        viewInvestments: true,
+        viewEmergencyFund: false,
+        viewFoodAllowance: true,
+      });
+
+      await service.updatePrivacy('u-1', { fullAccessAll: true, rules: [] });
+      const fullScopeForB = await service.resolveAuthorizedScope('u-2', 'family');
+      expect(fullScopeForB.memberPermissions?.get('u-1')?.viewIncome).toBe(true);
+    });
   });
 });

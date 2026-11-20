@@ -329,4 +329,64 @@ describe('BalanceService (Firestore)', () => {
     expect(preExisting.externalEmergencyFund).toBe(15000);
     expect(preExisting.balance).toBe(2000);
   });
+
+  it('creates, updates, deletes detailed dated investment items and materializes legacy totals', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-1',
+      name: 'Igor',
+      email: 'igor@test.com',
+      password: 'hash',
+      cpf: null,
+      phone: null,
+      emergencyFund: 0,
+      externalEmergencyFund: 0,
+      investments: 0,
+      externalInvestments: 5000,
+      createdAt: '2026-01-10T00:00:00.000Z',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.INCOME, {
+      id: 'inc-1',
+      userId: 'u-1',
+      name: 'Salário',
+      value: 3000,
+      incomeDate: '2026-10-05',
+      isRecurring: false,
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    const initialItems = await service.getInvestmentItems('u-1', 'individual');
+    expect(initialItems).toHaveLength(1);
+    expect(initialItems[0].amount).toBe(5000);
+    expect(initialItems[0].investedDate).toBe('2026-01-10');
+
+    const added = await service.createInvestmentItem('u-1', {
+      name: 'Tesouro Selic',
+      category: 'Tesouro Direto',
+      amount: 1000,
+      investedDate: '2026-11-15',
+      source: 'balance',
+      notes: 'Aporte mensal',
+    });
+
+    const balAfterCreate = await service.getBalance('u-1', 'individual');
+    expect(balAfterCreate.investments).toBe(6000);
+    expect(balAfterCreate.allocatedInvestments).toBe(1000);
+    expect(balAfterCreate.externalInvestments).toBe(5000);
+    expect(balAfterCreate.balance).toBe(2000);
+
+    await service.updateInvestmentItem('u-1', added.id, {
+      amount: 1500,
+      source: 'external',
+    });
+    const balAfterEdit = await service.getBalance('u-1', 'individual');
+    expect(balAfterEdit.investments).toBe(6500);
+    expect(balAfterEdit.allocatedInvestments).toBe(0);
+    expect(balAfterEdit.balance).toBe(3000);
+
+    await service.removeInvestmentItem('u-1', added.id);
+    const balAfterDelete = await service.getBalance('u-1', 'individual');
+    expect(balAfterDelete.investments).toBe(5000);
+  });
 });

@@ -66,12 +66,42 @@ export interface FamilyGroupDoc {
   updatedAt: string;
 }
 
+export type InvestmentSource = 'external' | 'balance';
+
+export interface InvestmentDoc {
+  id: string;
+  userId: string;
+  name: string;
+  category: string;
+  amount: number;
+  investedDate: string;
+  source: InvestmentSource;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FamilyMemberPermissions {
+  viewBalance: boolean;
+  viewIncome: boolean;
+  viewExpenses: boolean;
+  viewInvestments: boolean;
+  viewEmergencyFund: boolean;
+  viewFoodAllowance: boolean;
+}
+
+export interface FamilyPrivacyConfig {
+  fullAccessAll: boolean;
+  perMember: Record<string, FamilyMemberPermissions>;
+}
+
 export interface FamilyMemberDoc {
   id: string;
   familyGroupId: string;
   userId: string;
   userCpf: string;
   role: 'owner' | 'member';
+  privacyConfig?: FamilyPrivacyConfig;
   createdAt: string;
   updatedAt: string;
 }
@@ -95,6 +125,7 @@ export const COLLECTIONS = {
   ACCOUNT_TYPES: 'account_types',
   EXPENSES: 'expenses',
   INCOME: 'income',
+  INVESTMENTS: 'investments',
   FAMILY_GROUPS: 'family_groups',
   FAMILY_MEMBERS: 'family_members',
   FAMILY_INVITES: 'family_invites',

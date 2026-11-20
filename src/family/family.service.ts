@@ -22,10 +22,56 @@ import {
   FamilyGroupDoc,
   FamilyInviteDoc,
   FamilyMemberDoc,
+  FamilyMemberPermissions,
   IncomeDoc,
+  InvestmentDoc,
   UserDoc,
 } from '../firebase/firebase.types';
+import { UpdateFamilyPrivacyDto } from './dto/update-family-privacy.dto';
 import { FamilyEventsService } from './family-events.service';
+
+export const FULL_MEMBER_PERMISSIONS: FamilyMemberPermissions = {
+  viewBalance: true,
+  viewIncome: true,
+  viewExpenses: true,
+  viewInvestments: true,
+  viewEmergencyFund: true,
+  viewFoodAllowance: true,
+};
+
+export const RESTRICTED_MEMBER_PERMISSIONS: FamilyMemberPermissions = {
+  viewBalance: false,
+  viewIncome: false,
+  viewExpenses: false,
+  viewInvestments: false,
+  viewEmergencyFund: false,
+  viewFoodAllowance: false,
+};
+
+export function resolveMemberPermissionsForViewer(
+  ownerMember: FamilyMemberDoc | undefined,
+  viewerUserId: string,
+): FamilyMemberPermissions {
+  if (!ownerMember || ownerMember.userId === viewerUserId) {
+    return { ...FULL_MEMBER_PERMISSIONS };
+  }
+  const config = ownerMember.privacyConfig;
+  if (!config || config.fullAccessAll) {
+    return { ...FULL_MEMBER_PERMISSIONS };
+  }
+  const specific = config.perMember?.[viewerUserId];
+  if (!specific) {
+    return { ...RESTRICTED_MEMBER_PERMISSIONS };
+  }
+  return {
+    viewBalance: Boolean(specific.viewBalance),
+    viewIncome: Boolean(specific.viewIncome),
+    viewExpenses: Boolean(specific.viewExpenses),
+    viewInvestments: Boolean(specific.viewInvestments),
+    viewEmergencyFund: Boolean(specific.viewEmergencyFund),
+    viewFoodAllowance: Boolean(specific.viewFoodAllowance),
+  };
+}
 
 export interface AuthorizedScope {
   mode: 'individual' | 'family';
@@ -34,6 +80,7 @@ export interface AuthorizedScope {
     string,
     { id: string; name: string; maskedCpf: string; phone: string | null }
   >;
+  memberPermissions?: Map<string, FamilyMemberPermissions>;
   familyGroupId: string | null;
 }
 
@@ -70,11 +117,15 @@ export class FamilyService {
       phone: currentUser.phone,
     });
 
+    const memberPermissions = new Map<string, FamilyMemberPermissions>();
+    memberPermissions.set(currentUser.id, { ...FULL_MEMBER_PERMISSIONS });
+
     if (requestedScope !== 'family') {
       return {
         mode: 'individual',
         userIds: [currentUser.id],
         userMap: individualMap,
+        memberPermissions,
         familyGroupId: null,
       };
     }
@@ -130,6 +181,10 @@ export class FamilyService {
           maskedCpf: maskCpf(user.cpf),
           phone: user.phone,
         });
+        memberPermissions.set(
+          user.id,
+          resolveMemberPermissionsForViewer(member, currentUser.id),
+        );
       }
     }
 
@@ -141,6 +196,7 @@ export class FamilyService {
       mode: 'family',
       userIds: verifiedUserIds,
       userMap,
+      memberPermissions,
       familyGroupId: membership.familyGroupId,
     };
   }
@@ -206,6 +262,7 @@ export class FamilyService {
       phone: string | null;
       role: 'owner' | 'member';
       isSelf: boolean;
+      permissionsSharedWithMe: FamilyMemberPermissions;
     }> = [];
 
     if (membership) {
@@ -240,6 +297,10 @@ export class FamilyService {
           phone: user!.phone,
           role: m.role,
           isSelf: user!.id === currentUser.id,
+          permissionsSharedWithMe: resolveMemberPermissionsForViewer(
+            m,
+            currentUser.id,
+          ),
         }));
     }
 
@@ -298,6 +359,18 @@ export class FamilyService {
       hasGroup: Boolean(membership),
       group: group ? { id: group.id, name: group.name } : null,
       members,
+      myPrivacy: {
+        fullAccessAll: membership?.privacyConfig?.fullAccessAll ?? true,
+        rules: members
+          .filter((m) => !m.isSelf)
+          .map((m) => ({
+            targetUserId: m.userId,
+            ...resolveMemberPermissionsForViewer(
+              membership ?? undefined,
+              m.userId,
+            ),
+          })),
+      },
       pendingReceivedInvites: pendingReceivedRaw
         .map((inv) => ({ inv, inviter: usersById.get(inv.inviterUserId) }))
         .filter(({ inv, inviter }) => inviter && inviter.cpf === inv.inviterCpf)
@@ -332,6 +405,7 @@ export class FamilyService {
     let userIds = [currentUser.id];
     let groupId = 'none';
     let membersCount = 0;
+    let privacyStamp = 'none';
 
     if (currentUser.cpf) {
       const membership = await this.firebase.findById<FamilyMemberDoc>(
@@ -347,29 +421,39 @@ export class FamilyService {
         );
         userIds = members.map((m) => m.userId);
         membersCount = members.length;
+        privacyStamp = members
+          .map((m) => `${m.userId}:${m.updatedAt || ''}`)
+          .sort()
+          .join('|');
       }
     }
 
-    const [expenses, incomes, users, receivedInvites] = await Promise.all([
-      this.firebase.findByFieldIn<ExpenseDoc>(
-        COLLECTIONS.EXPENSES,
-        'userId',
-        userIds,
-      ),
-      this.firebase.findByFieldIn<IncomeDoc>(
-        COLLECTIONS.INCOME,
-        'userId',
-        userIds,
-      ),
-      this.firebase.findByFieldIn<UserDoc>(COLLECTIONS.USERS, 'id', userIds),
-      currentUser.cpf
-        ? this.firebase.findByField<FamilyInviteDoc>(
-            COLLECTIONS.FAMILY_INVITES,
-            'inviteeUserId',
-            currentUser.id,
-          )
-        : Promise.resolve([]),
-    ]);
+    const [expenses, incomes, users, investmentItems, receivedInvites] =
+      await Promise.all([
+        this.firebase.findByFieldIn<ExpenseDoc>(
+          COLLECTIONS.EXPENSES,
+          'userId',
+          userIds,
+        ),
+        this.firebase.findByFieldIn<IncomeDoc>(
+          COLLECTIONS.INCOME,
+          'userId',
+          userIds,
+        ),
+        this.firebase.findByFieldIn<UserDoc>(COLLECTIONS.USERS, 'id', userIds),
+        this.firebase.findByFieldIn<InvestmentDoc>(
+          COLLECTIONS.INVESTMENTS,
+          'userId',
+          userIds,
+        ),
+        currentUser.cpf
+          ? this.firebase.findByField<FamilyInviteDoc>(
+              COLLECTIONS.FAMILY_INVITES,
+              'inviteeUserId',
+              currentUser.id,
+            )
+          : Promise.resolve([]),
+      ]);
 
     const pendingInvitesCount = receivedInvites.filter(
       (inv) => inv.status === 'pending' && inv.inviteeCpf === currentUser.cpf,
@@ -388,6 +472,10 @@ export class FamilyService {
     );
     const userMax = users.reduce(
       (max, u) => Math.max(max, new Date(u.updatedAt || 0).getTime()),
+      0,
+    );
+    const invItemMax = investmentItems.reduce(
+      (max, it) => Math.max(max, new Date(it.updatedAt || 0).getTime()),
       0,
     );
     const reserveSum = users.reduce(
@@ -417,9 +505,12 @@ export class FamilyService {
       incSum.toFixed(2),
       incMax,
       userMax,
+      investmentItems.length,
+      invItemMax,
       reserveSum.toFixed(2),
       invSum.toFixed(2),
       foodSum.toFixed(2),
+      privacyStamp,
     ].join(':');
 
     return {
@@ -739,6 +830,62 @@ export class FamilyService {
     );
 
     return { message: 'Convite cancelado.' };
+  }
+
+  async updatePrivacy(userId: string, dto: UpdateFamilyPrivacyDto) {
+    const currentUser = await this.firebase.findById<UserDoc>(
+      COLLECTIONS.USERS,
+      userId,
+    );
+    if (!currentUser || !currentUser.cpf || !isValidCpf(currentUser.cpf)) {
+      throw new ForbiddenException('Usuário não autorizado.');
+    }
+
+    const membership = await this.firebase.findById<FamilyMemberDoc>(
+      COLLECTIONS.FAMILY_MEMBERS,
+      userId,
+    );
+    if (!membership || membership.userCpf !== currentUser.cpf) {
+      throw new ForbiddenException(
+        'Você não participa de um Painel Família ativo.',
+      );
+    }
+
+    const allMembers = await this.firebase.findByField<FamilyMemberDoc>(
+      COLLECTIONS.FAMILY_MEMBERS,
+      'familyGroupId',
+      membership.familyGroupId,
+    );
+    const validTargetIds = new Set(
+      allMembers.map((m) => m.userId).filter((id) => id !== userId),
+    );
+
+    const perMember: Record<string, FamilyMemberPermissions> = {};
+    for (const rule of dto.rules || []) {
+      if (validTargetIds.has(rule.targetUserId)) {
+        perMember[rule.targetUserId] = {
+          viewBalance: Boolean(rule.viewBalance),
+          viewIncome: Boolean(rule.viewIncome),
+          viewExpenses: Boolean(rule.viewExpenses),
+          viewInvestments: Boolean(rule.viewInvestments),
+          viewEmergencyFund: Boolean(rule.viewEmergencyFund),
+          viewFoodAllowance: Boolean(rule.viewFoodAllowance),
+        };
+      }
+    }
+
+    await this.firebase.updateDoc(COLLECTIONS.FAMILY_MEMBERS, membership.id, {
+      privacyConfig: {
+        fullAccessAll: Boolean(dto.fullAccessAll),
+        perMember,
+      },
+      updatedAt: new Date().toISOString(),
+    });
+
+    await this.notifyFamilyDataChanged(userId, 'data_updated');
+    await this.notifyFamilyDataChanged(userId, 'family_changed');
+
+    return this.getStatus(userId);
   }
 
   async leaveFamily(userId: string) {

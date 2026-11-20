@@ -171,16 +171,25 @@ export class ExpensesService {
       scope,
     );
 
+    const visibleUserIds =
+      authScope.mode === 'family'
+        ? authScope.userIds.filter(
+            (uid) =>
+              uid === userId ||
+              (authScope.memberPermissions?.get(uid)?.viewExpenses ?? true),
+          )
+        : authScope.userIds;
+
     const [expenses, accountTypes] = await Promise.all([
       this.firebase.findByFieldIn<ExpenseDoc>(
         COLLECTIONS.EXPENSES,
         'userId',
-        authScope.userIds,
+        visibleUserIds,
       ),
       this.firebase.findByFieldIn<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
         'userId',
-        authScope.userIds,
+        visibleUserIds,
       ),
     ]);
 

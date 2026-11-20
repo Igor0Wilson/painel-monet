@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Request,
   Res,
@@ -17,6 +18,7 @@ import { FamilyService } from './family.service';
 import { FamilyEventsService } from './family-events.service';
 import { InviteFamilyDto } from './dto/invite-family.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
+import { UpdateFamilyPrivacyDto } from './dto/update-family-privacy.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('family')
@@ -93,6 +95,14 @@ export class FamilyController {
   @Delete('invites/:id')
   cancelInvite(@Request() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.familyService.cancelInvite(req.user.userId, id);
+  }
+
+  @Patch('privacy')
+  updatePrivacy(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateFamilyPrivacyDto,
+  ) {
+    return this.familyService.updatePrivacy(req.user.userId, dto);
   }
 
   @Post('leave')

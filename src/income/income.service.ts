@@ -31,10 +31,19 @@ export class IncomeService {
       scope,
     );
 
+    const visibleUserIds =
+      authScope.mode === 'family'
+        ? authScope.userIds.filter(
+            (uid) =>
+              uid === userId ||
+              (authScope.memberPermissions?.get(uid)?.viewIncome ?? true),
+          )
+        : authScope.userIds;
+
     const incomes = await this.firebase.findByFieldIn<IncomeDoc>(
       COLLECTIONS.INCOME,
       'userId',
-      authScope.userIds,
+      visibleUserIds,
     );
 
     return incomes

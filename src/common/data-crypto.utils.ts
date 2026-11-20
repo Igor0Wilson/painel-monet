@@ -6,6 +6,7 @@ const ENC_PREFIX = 'enc:v1:';
 const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['name'],
   [COLLECTIONS.EXPENSES]: ['name'],
+  [COLLECTIONS.INVESTMENTS]: ['name', 'category', 'notes'],
   [COLLECTIONS.USERS]: ['cpf', 'phone'],
   [COLLECTIONS.FAMILY_MEMBERS]: ['userCpf'],
   [COLLECTIONS.FAMILY_INVITES]: ['inviterCpf', 'inviteeCpf'],
@@ -14,6 +15,7 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
 const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['value'],
   [COLLECTIONS.EXPENSES]: ['value'],
+  [COLLECTIONS.INVESTMENTS]: ['amount'],
   [COLLECTIONS.USERS]: [
     'emergencyFund',
     'externalEmergencyFund',

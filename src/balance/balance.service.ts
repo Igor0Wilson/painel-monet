@@ -1,12 +1,22 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
-import { FamilyService } from '../family/family.service';
+import {
+  FamilyService,
+  FULL_MEMBER_PERMISSIONS,
+} from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   AccountTypeDoc,
   COLLECTIONS,
   ExpenseDoc,
+  FamilyMemberPermissions,
   IncomeDoc,
+  InvestmentDoc,
   UserDoc,
 } from '../firebase/firebase.types';
 import {
@@ -17,6 +27,14 @@ import {
   getTodayParts,
   parseDateOnly,
 } from '../income/income.date-utils';
+import { CreateInvestmentItemDto } from './dto/create-investment-item.dto';
+import { UpdateInvestmentItemDto } from './dto/update-investment-item.dto';
+
+export interface InvestmentItemView extends InvestmentDoc {
+  ownerId: string;
+  ownerName: string;
+  isOwn: boolean;
+}
 
 @Injectable()
 export class BalanceService {
@@ -211,12 +229,68 @@ export class BalanceService {
           }
         }
 
-        const metrics = this.computeUserMetrics(
+        const rawMetrics = this.computeUserMetrics(
           effectiveUser,
           uIncomes,
           uExpenses,
           today,
         );
+        const permissions: FamilyMemberPermissions =
+          u.id === userId || authScope.mode !== 'family'
+            ? { ...FULL_MEMBER_PERMISSIONS }
+            : (authScope.memberPermissions?.get(u.id) ?? {
+                ...FULL_MEMBER_PERMISSIONS,
+              });
+
+        const metrics = {
+          ...rawMetrics,
+          balance: permissions.viewBalance ? rawMetrics.balance : 0,
+          totalIncome: permissions.viewIncome ? rawMetrics.totalIncome : 0,
+          scheduledIncome: permissions.viewIncome
+            ? rawMetrics.scheduledIncome
+            : 0,
+          totalExpenses: permissions.viewExpenses
+            ? rawMetrics.totalExpenses
+            : 0,
+          emergencyFund: permissions.viewEmergencyFund
+            ? rawMetrics.emergencyFund
+            : 0,
+          allocatedEmergencyFund: permissions.viewEmergencyFund
+            ? rawMetrics.allocatedEmergencyFund
+            : 0,
+          externalEmergencyFund: permissions.viewEmergencyFund
+            ? rawMetrics.externalEmergencyFund
+            : 0,
+          investments: permissions.viewInvestments ? rawMetrics.investments : 0,
+          allocatedInvestments: permissions.viewInvestments
+            ? rawMetrics.allocatedInvestments
+            : 0,
+          externalInvestments: permissions.viewInvestments
+            ? rawMetrics.externalInvestments
+            : 0,
+          foodAllowance: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowance
+            : 0,
+          foodAllowanceTotal: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceTotal
+            : 0,
+          foodAllowanceConfigured: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceConfigured
+            : 0,
+          foodAllowanceScheduled: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceScheduled
+            : 0,
+          foodAllowanceUsed: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceUsed
+            : 0,
+          foodAllowanceDate: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceDate
+            : null,
+          foodAllowanceNextDate: permissions.viewFoodAllowance
+            ? rawMetrics.foodAllowanceNextDate
+            : null,
+        };
+
         const info = authScope.userMap.get(u.id);
         return {
           userId: u.id,
@@ -224,6 +298,7 @@ export class BalanceService {
           maskedCpf: info?.maskedCpf || '***.***.***-**',
           phone: u.phone || null,
           isSelf: u.id === userId,
+          permissions,
           ...metrics,
         };
       }),
@@ -305,11 +380,16 @@ export class BalanceService {
   }
 
   async reconcileSavingsOnIncomeChange(userId: string): Promise<void> {
-    const [user, userIncomes, userExpenses] = await Promise.all([
+    const [user, userIncomes, userExpenses, investmentItems] = await Promise.all([
       this.firebase.findById<UserDoc>(COLLECTIONS.USERS, userId),
       this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
       this.firebase.findByField<ExpenseDoc>(
         COLLECTIONS.EXPENSES,
+        'userId',
+        userId,
+      ),
+      this.firebase.findByField<InvestmentDoc>(
+        COLLECTIONS.INVESTMENTS,
         'userId',
         userId,
       ),
@@ -323,10 +403,298 @@ export class BalanceService {
     const shift = this.computeUncoveredShift(user, totalIncome - cashExpenses);
     if (!shift) return;
 
+    const now = new Date().toISOString();
+    let remainingToReclassify = Number(
+      (Number(user.investments || 0) - shift.investments).toFixed(2),
+    );
+
+    if (remainingToReclassify > 0.001 && investmentItems.length > 0) {
+      const balanceItems = investmentItems
+        .filter((it) => it.source === 'balance')
+        .sort((a, b) => a.investedDate.localeCompare(b.investedDate));
+
+      for (const item of balanceItems) {
+        if (remainingToReclassify <= 0.001) break;
+        const itemAmount = Number(item.amount);
+        if (itemAmount <= remainingToReclassify + 0.001) {
+          await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
+            source: 'external',
+            updatedAt: now,
+          });
+          remainingToReclassify = Number(
+            (remainingToReclassify - itemAmount).toFixed(2),
+          );
+        } else {
+          const keepOnBalance = Number(
+            (itemAmount - remainingToReclassify).toFixed(2),
+          );
+          await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
+            amount: keepOnBalance,
+            updatedAt: now,
+          });
+          const movedSplit: InvestmentDoc = {
+            id: uuidv4(),
+            userId,
+            name: `${item.name} (reclassificado)`,
+            category: item.category,
+            amount: remainingToReclassify,
+            investedDate: item.investedDate,
+            source: 'external',
+            notes: item.notes ?? null,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await this.firebase.setDoc(COLLECTIONS.INVESTMENTS, movedSplit);
+          remainingToReclassify = 0;
+        }
+      }
+    }
+
     await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
       ...shift,
+      updatedAt: now,
+    });
+  }
+
+  private async materializeLegacyInvestmentsIfEmpty(
+    user: UserDoc,
+  ): Promise<InvestmentDoc[]> {
+    const existing = await this.firebase.findByField<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      'userId',
+      user.id,
+    );
+    if (existing.length > 0) {
+      return existing;
+    }
+
+    const legacyExt = Number(user.externalInvestments || 0);
+    const legacyAlloc = Number(user.investments || 0);
+    if (legacyExt <= 0 && legacyAlloc <= 0) {
+      return [];
+    }
+
+    const now = new Date().toISOString();
+    const defaultDate =
+      user.createdAt && /^\d{4}-\d{2}-\d{2}/.test(user.createdAt)
+        ? user.createdAt.slice(0, 10)
+        : formatDateOnly(getTodayParts());
+
+    const seeded: InvestmentDoc[] = [];
+
+    if (legacyExt > 0) {
+      const extItem: InvestmentDoc = {
+        id: uuidv4(),
+        userId: user.id,
+        name: 'Carteira anterior consolidada',
+        category: 'Renda Fixa',
+        amount: Number(legacyExt.toFixed(2)),
+        investedDate: defaultDate,
+        source: 'external',
+        notes: 'Saldo migrado automaticamente para controle detalhado',
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.firebase.setDoc(COLLECTIONS.INVESTMENTS, extItem);
+      seeded.push(extItem);
+    }
+
+    if (legacyAlloc > 0) {
+      const allocItem: InvestmentDoc = {
+        id: uuidv4(),
+        userId: user.id,
+        name: 'Aporte alocado do saldo do mês',
+        category: 'Renda Fixa',
+        amount: Number(legacyAlloc.toFixed(2)),
+        investedDate: formatDateOnly(getTodayParts()),
+        source: 'balance',
+        notes: 'Aporte vinculado ao saldo livre mensal',
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.firebase.setDoc(COLLECTIONS.INVESTMENTS, allocItem);
+      seeded.push(allocItem);
+    }
+
+    return seeded;
+  }
+
+  private async syncUserInvestmentTotalsFromItems(
+    userId: string,
+  ): Promise<void> {
+    const items = await this.firebase.findByField<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      'userId',
+      userId,
+    );
+    let balanceSum = 0;
+    let externalSum = 0;
+
+    for (const item of items) {
+      if (item.source === 'balance') {
+        balanceSum += Number(item.amount || 0);
+      } else {
+        externalSum += Number(item.amount || 0);
+      }
+    }
+
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      investments: Number(balanceSum.toFixed(2)),
+      externalInvestments: Number(externalSum.toFixed(2)),
       updatedAt: new Date().toISOString(),
     });
+  }
+
+  async getInvestmentItems(
+    userId: string,
+    scope?: string,
+  ): Promise<InvestmentItemView[]> {
+    const authScope = await this.familyService.resolveAuthorizedScope(
+      userId,
+      scope,
+    );
+    const selfUser = await this.firebase.findById<UserDoc>(
+      COLLECTIONS.USERS,
+      userId,
+    );
+    if (selfUser) {
+      await this.materializeLegacyInvestmentsIfEmpty(selfUser);
+    }
+
+    const visibleUserIds =
+      authScope.mode === 'family'
+        ? authScope.userIds.filter(
+            (uid) =>
+              uid === userId ||
+              (authScope.memberPermissions?.get(uid)?.viewInvestments ?? true),
+          )
+        : authScope.userIds;
+
+    const items = await this.firebase.findByFieldIn<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      'userId',
+      visibleUserIds,
+    );
+
+    return items
+      .sort((a, b) => b.investedDate.localeCompare(a.investedDate))
+      .map((item) => ({
+        ...item,
+        amount: Number(item.amount),
+        ownerId: item.userId,
+        ownerName: authScope.userMap.get(item.userId)?.name || 'Usuário',
+        isOwn: item.userId === userId,
+      }));
+  }
+
+  async createInvestmentItem(userId: string, dto: CreateInvestmentItemDto) {
+    const user = await this.firebase.findById<UserDoc>(
+      COLLECTIONS.USERS,
+      userId,
+    );
+    if (!user) {
+      throw new NotFoundException('Usuário não encontrado.');
+    }
+
+    await this.materializeLegacyInvestmentsIfEmpty(user);
+
+    const amount = Number(Number(dto.amount).toFixed(2));
+    if (dto.source === 'balance') {
+      const current = await this.getBalance(userId, 'individual');
+      if (amount > current.ownBalance + 0.001) {
+        throw new BadRequestException(
+          'Saldo disponível insuficiente para este aporte do mês. Use "Carteira já existente" para registrar investimentos anteriores.',
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    const doc: InvestmentDoc = {
+      id: uuidv4(),
+      userId,
+      name: dto.name.trim(),
+      category: dto.category.trim(),
+      amount,
+      investedDate: dto.investedDate,
+      source: dto.source,
+      notes: dto.notes?.trim() || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await this.firebase.setDoc(COLLECTIONS.INVESTMENTS, doc);
+    await this.syncUserInvestmentTotalsFromItems(userId);
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    return doc;
+  }
+
+  async updateInvestmentItem(
+    userId: string,
+    itemId: string,
+    dto: UpdateInvestmentItemDto,
+  ) {
+    const existing = await this.firebase.findById<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      itemId,
+    );
+    if (!existing || existing.userId !== userId) {
+      throw new NotFoundException('Investimento não encontrado.');
+    }
+
+    const nextSource = dto.source ?? existing.source;
+    const nextAmount =
+      dto.amount !== undefined
+        ? Number(Number(dto.amount).toFixed(2))
+        : Number(existing.amount);
+
+    const oldBalanceImpact =
+      existing.source === 'balance' ? Number(existing.amount) : 0;
+    const newBalanceImpact = nextSource === 'balance' ? nextAmount : 0;
+    const additionalRequired = Number(
+      (newBalanceImpact - oldBalanceImpact).toFixed(2),
+    );
+
+    if (additionalRequired > 0.001) {
+      const current = await this.getBalance(userId, 'individual');
+      if (additionalRequired > current.ownBalance + 0.001) {
+        throw new BadRequestException(
+          'O aumento do aporte excede o seu patrimônio disponível do mês.',
+        );
+      }
+    }
+
+    const updateData: Partial<InvestmentDoc> = {
+      updatedAt: new Date().toISOString(),
+    };
+    if (dto.name !== undefined) updateData.name = dto.name.trim();
+    if (dto.category !== undefined) updateData.category = dto.category.trim();
+    if (dto.amount !== undefined) updateData.amount = nextAmount;
+    if (dto.investedDate !== undefined) {
+      updateData.investedDate = dto.investedDate;
+    }
+    if (dto.source !== undefined) updateData.source = dto.source;
+    if (dto.notes !== undefined) updateData.notes = dto.notes.trim() || null;
+
+    await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, itemId, updateData);
+    await this.syncUserInvestmentTotalsFromItems(userId);
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    return { ...existing, ...updateData };
+  }
+
+  async removeInvestmentItem(userId: string, itemId: string): Promise<void> {
+    const existing = await this.firebase.findById<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      itemId,
+    );
+    if (!existing || existing.userId !== userId) {
+      throw new NotFoundException('Investimento não encontrado.');
+    }
+
+    await this.firebase.deleteDoc(COLLECTIONS.INVESTMENTS, itemId);
+    await this.syncUserInvestmentTotalsFromItems(userId);
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
   }
 
   private async updateSavingsBucket(params: {
@@ -363,6 +731,21 @@ export class BalanceService {
       if (reclassifyAllocatedToExternal) {
         const currentAlloc = Number(user[allocatedField] || 0);
         const currentExt = Number(user[externalField] || 0);
+        if (allocatedField === 'investments') {
+          const items = await this.firebase.findByField<InvestmentDoc>(
+            COLLECTIONS.INVESTMENTS,
+            'userId',
+            userId,
+          );
+          for (const item of items) {
+            if (item.source === 'balance') {
+              await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
+                source: 'external',
+                updatedAt: now,
+              });
+            }
+          }
+        }
         await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
           [allocatedField]: 0,
           [externalField]: Number((currentExt + currentAlloc).toFixed(2)),
@@ -491,21 +874,39 @@ export class BalanceService {
       scope,
     );
 
+    const expenseAllowedIds =
+      authScope.mode === 'family'
+        ? authScope.userIds.filter(
+            (uid) =>
+              uid === userId ||
+              (authScope.memberPermissions?.get(uid)?.viewExpenses ?? true),
+          )
+        : authScope.userIds;
+
+    const incomeAllowedIds =
+      authScope.mode === 'family'
+        ? authScope.userIds.filter(
+            (uid) =>
+              uid === userId ||
+              (authScope.memberPermissions?.get(uid)?.viewIncome ?? true),
+          )
+        : authScope.userIds;
+
     const [expenses, incomes, accountTypes] = await Promise.all([
       this.firebase.findByFieldIn<ExpenseDoc>(
         COLLECTIONS.EXPENSES,
         'userId',
-        authScope.userIds,
+        expenseAllowedIds,
       ),
       this.firebase.findByFieldIn<IncomeDoc>(
         COLLECTIONS.INCOME,
         'userId',
-        authScope.userIds,
+        incomeAllowedIds,
       ),
       this.firebase.findByFieldIn<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
         'userId',
-        authScope.userIds,
+        expenseAllowedIds,
       ),
     ]);
 

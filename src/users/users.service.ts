@@ -23,6 +23,7 @@ import {
   FamilyInviteDoc,
   FamilyMemberDoc,
   IncomeDoc,
+  InvestmentDoc,
   UserDoc,
 } from '../firebase/firebase.types';
 import { evaluateIncomeCredit, getTodayParts } from '../income/income.date-utils';
@@ -318,24 +319,44 @@ export class UsersService {
       );
     }
 
-    const [rawCategories, rawIncomes, rawExpenses] = await Promise.all([
-      this.firebase.findByField<AccountTypeDoc>(
-        COLLECTIONS.ACCOUNT_TYPES,
-        'userId',
-        user.id,
-      ),
-      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', user.id),
-      this.firebase.findByField<ExpenseDoc>(
-        COLLECTIONS.EXPENSES,
-        'userId',
-        user.id,
-      ),
-    ]);
+    const [rawCategories, rawIncomes, rawExpenses, rawInvestments] =
+      await Promise.all([
+        this.firebase.findByField<AccountTypeDoc>(
+          COLLECTIONS.ACCOUNT_TYPES,
+          'userId',
+          user.id,
+        ),
+        this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', user.id),
+        this.firebase.findByField<ExpenseDoc>(
+          COLLECTIONS.EXPENSES,
+          'userId',
+          user.id,
+        ),
+        this.firebase.findByField<InvestmentDoc>(
+          COLLECTIONS.INVESTMENTS,
+          'userId',
+          user.id,
+        ),
+      ]);
 
     // Dupla trava em memória: garante que 100% dos registros pertencem exclusivamente a este user.id
     const categories = rawCategories.filter((c) => c.userId === user.id);
     const incomes = rawIncomes.filter((i) => i.userId === user.id);
     const expenses = rawExpenses.filter((e) => e.userId === user.id);
+    const investmentItems = rawInvestments
+      .filter((inv) => inv.userId === user.id)
+      .sort((a, b) => b.investedDate.localeCompare(a.investedDate))
+      .map((inv) => ({
+        id: inv.id,
+        userId: user.id,
+        ownerCpfMasked: maskCpf(userCpf),
+        name: inv.name,
+        category: inv.category,
+        amount: Number(inv.amount || 0),
+        investedDate: inv.investedDate,
+        source: inv.source,
+        notes: inv.notes ?? null,
+      }));
 
     const typesById = new Map(categories.map((c) => [c.id, c]));
     const today = getTodayParts();
@@ -466,6 +487,7 @@ export class UsersService {
       categories,
       incomes: formattedIncomes,
       expenses: formattedExpenses,
+      investmentsList: investmentItems,
     };
   }
 
