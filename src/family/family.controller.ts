@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
+import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { FamilyService } from './family.service';
 import { FamilyEventsService } from './family-events.service';
@@ -26,17 +27,17 @@ export class FamilyController {
   ) { }
 
   @Get('status')
-  getStatus(@Request() req: any) {
+  getStatus(@Request() req: AuthenticatedRequest) {
     return this.familyService.getStatus(req.user.userId);
   }
 
   @Get('sync')
-  getSyncVersion(@Request() req: any) {
+  getSyncVersion(@Request() req: AuthenticatedRequest) {
     return this.familyService.getSyncVersion(req.user.userId);
   }
 
   @Get('stream')
-  stream(@Request() req: any, @Res() res: Response) {
+  stream(@Request() req: AuthenticatedRequest, @Res() res: Response) {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -71,13 +72,13 @@ export class FamilyController {
 
   @Throttle({ default: { ttl: 60000, limit: 10 } })
   @Post('invite')
-  invite(@Request() req: any, @Body() dto: InviteFamilyDto) {
+  invite(@Request() req: AuthenticatedRequest, @Body() dto: InviteFamilyDto) {
     return this.familyService.inviteByCpf(req.user.userId, dto.cpf);
   }
 
   @Post('invites/:id/accept')
   acceptInvite(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Param('id') id: string,
     @Body() dto: AcceptInviteDto,
   ) {
@@ -85,17 +86,17 @@ export class FamilyController {
   }
 
   @Post('invites/:id/reject')
-  rejectInvite(@Request() req: any, @Param('id') id: string) {
+  rejectInvite(@Request() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.familyService.rejectInvite(req.user.userId, id);
   }
 
   @Delete('invites/:id')
-  cancelInvite(@Request() req: any, @Param('id') id: string) {
+  cancelInvite(@Request() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.familyService.cancelInvite(req.user.userId, id);
   }
 
   @Post('leave')
-  leaveFamily(@Request() req: any) {
+  leaveFamily(@Request() req: AuthenticatedRequest) {
     return this.familyService.leaveFamily(req.user.userId);
   }
 }

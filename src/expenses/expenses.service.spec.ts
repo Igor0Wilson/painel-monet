@@ -1,11 +1,16 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
+import { FamilyService } from '../family/family.service';
+import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS } from '../firebase/firebase.types';
-import { ExpensesService } from './expenses.service';
+import { ExpensesService, ExpenseWithStatus } from './expenses.service';
 
 describe('ExpensesService (Firestore)', () => {
   let firebase: InMemoryFirebaseService;
-  let familyService: any;
+  let familyService: Pick<
+    FamilyService,
+    'resolveAuthorizedScope' | 'notifyFamilyDataChanged'
+  >;
   let service: ExpensesService;
 
   beforeEach(async () => {
@@ -33,11 +38,14 @@ describe('ExpensesService (Firestore)', () => {
       notifyFamilyDataChanged: jest.fn().mockResolvedValue(undefined),
     };
 
-    service = new ExpensesService(firebase as any, familyService);
+    service = new ExpensesService(
+      firebase as unknown as FirebaseService,
+      familyService as unknown as FamilyService,
+    );
   });
 
   it('splits cent remainders accurately when creating credit card installments', async () => {
-    const result = await service.create(
+    const result = (await service.create(
       {
         name: 'Fone',
         accountTypeId: 'cat-1',
@@ -49,12 +57,12 @@ describe('ExpensesService (Firestore)', () => {
         firstInstallmentDate: '2026-12-10',
       },
       'u-1',
-    );
+    )) as ExpenseWithStatus[];
 
     expect(result).toHaveLength(3);
-    expect(result.map((r: any) => r.value)).toEqual([33.33, 33.33, 33.34]);
+    expect(result.map((r) => r.value)).toEqual([33.33, 33.33, 33.34]);
     expect(
-      result.every((r: any) => r.isCreditCard === true && r.isPaid === false),
+      result.every((r) => r.isCreditCard === true && r.isPaid === false),
     ).toBe(true);
     expect(familyService.notifyFamilyDataChanged).toHaveBeenCalledWith(
       'u-1',

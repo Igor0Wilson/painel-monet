@@ -10,6 +10,7 @@ import {
   UseGuards,
   Patch,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { IncomeService } from './income.service';
 import { CreateIncomeDto } from './dto/create-income.dto';
@@ -21,17 +22,17 @@ export class IncomeController {
   constructor(private readonly service: IncomeService) {}
 
   @Get()
-  findAll(@Request() req: any, @Query('scope') scope?: string) {
+  findAll(@Request() req: AuthenticatedRequest, @Query('scope') scope?: string) {
     return this.service.findAll(req.user.userId, scope);
   }
 
   @Post()
-  create(@Body() dto: CreateIncomeDto, @Request() req: any) {
+  create(@Body() dto: CreateIncomeDto, @Request() req: AuthenticatedRequest) {
     return this.service.create(dto, req.user.userId);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Request() req: any) {
+  remove(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
     return this.service.remove(id, req.user.userId);
   }
 
@@ -39,7 +40,7 @@ export class IncomeController {
   update(
     @Param('id') id: string,
     @Body() dto: UpdateIncomeDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
     return this.service.update(id, dto, req.user.userId);
   }

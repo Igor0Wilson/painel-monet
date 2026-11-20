@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
+import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS } from '../firebase/firebase.types';
 import { UsersService } from './users.service';
 
@@ -13,7 +14,7 @@ describe('UsersService (Firebase Auth + Firestore)', () => {
 
   beforeEach(() => {
     firebase = new InMemoryFirebaseService();
-    service = new UsersService(firebase as any);
+    service = new UsersService(firebase as unknown as FirebaseService);
   });
 
   it('rejects duplicate CPF atomically with CPF_ALREADY_EXISTS code', async () => {
@@ -38,7 +39,9 @@ describe('UsersService (Firebase Auth + Firestore)', () => {
       fail('Deveria rejeitar CPF duplicado');
     } catch (error) {
       expect(error).toBeInstanceOf(ConflictException);
-      const response = (error as ConflictException).getResponse() as any;
+      const response = (error as ConflictException).getResponse() as {
+        code?: string;
+      };
       expect(response.code).toBe('CPF_ALREADY_EXISTS');
     }
   });

@@ -156,7 +156,7 @@ export class FirebaseService implements OnModuleInit {
     this.resolvedProjectId =
       process.env.FIREBASE_PROJECT_ID?.trim() ||
       serviceAccount.projectId ||
-      (serviceAccount as any).project_id ||
+      (serviceAccount as Record<string, string | undefined>).project_id ||
       'painel-monet';
 
     if (getApps().length === 0) {
@@ -183,9 +183,9 @@ export class FirebaseService implements OnModuleInit {
 
   private migrateIfUnencrypted(
     collectionName: string,
-    rawDoc: Record<string, any> | undefined,
+    rawDoc: Record<string, unknown> | undefined,
   ): void {
-    if (!rawDoc || !rawDoc.id) return;
+    if (!rawDoc || typeof rawDoc.id !== 'string' || !rawDoc.id) return;
     if (hasUnencryptedSensitiveFields(collectionName, rawDoc)) {
       const encrypted = encryptDocumentForStorage(collectionName, rawDoc);
       this.collection(collectionName)
@@ -199,7 +199,7 @@ export class FirebaseService implements OnModuleInit {
     if (!id) return null;
     const snap = await this.collection(collectionName).doc(id).get();
     if (!snap.exists) return null;
-    const raw = snap.data() as Record<string, any>;
+    const raw = snap.data() as Record<string, unknown>;
     this.migrateIfUnencrypted(collectionName, raw);
     return decryptDocumentFromStorage(collectionName, raw) as T;
   }
@@ -219,15 +219,15 @@ export class FirebaseService implements OnModuleInit {
         this.collection(collectionName).where(field, '==', value).get(),
       ]);
 
-      const byId = new Map<string, Record<string, any>>();
+      const byId = new Map<string, Record<string, unknown>>();
       encSnap.docs.forEach((doc) => {
-        const data = doc.data() as Record<string, any>;
-        byId.set(data.id || doc.id, data);
+        const data = doc.data() as Record<string, unknown>;
+        byId.set(String(data.id || doc.id), data);
       });
       plainSnap.docs.forEach((doc) => {
-        const data = doc.data() as Record<string, any>;
+        const data = doc.data() as Record<string, unknown>;
         this.migrateIfUnencrypted(collectionName, data);
-        byId.set(data.id || doc.id, data);
+        byId.set(String(data.id || doc.id), data);
       });
 
       return Array.from(byId.values()).map(
@@ -239,7 +239,7 @@ export class FirebaseService implements OnModuleInit {
       .where(field, '==', value)
       .get();
     return snap.docs.map((doc) => {
-      const raw = doc.data() as Record<string, any>;
+      const raw = doc.data() as Record<string, unknown>;
       this.migrateIfUnencrypted(collectionName, raw);
       return decryptDocumentFromStorage(collectionName, raw) as T;
     });
@@ -260,7 +260,7 @@ export class FirebaseService implements OnModuleInit {
         .limit(1)
         .get();
       if (!encSnap.empty) {
-        const raw = encSnap.docs[0].data() as Record<string, any>;
+        const raw = encSnap.docs[0].data() as Record<string, unknown>;
         return decryptDocumentFromStorage(collectionName, raw) as T;
       }
     }
@@ -270,7 +270,7 @@ export class FirebaseService implements OnModuleInit {
       .limit(1)
       .get();
     if (snap.empty) return null;
-    const raw = snap.docs[0].data() as Record<string, any>;
+    const raw = snap.docs[0].data() as Record<string, unknown>;
     this.migrateIfUnencrypted(collectionName, raw);
     return decryptDocumentFromStorage(collectionName, raw) as T;
   }
@@ -293,7 +293,7 @@ export class FirebaseService implements OnModuleInit {
         .where(field, 'in', chunk)
         .get();
       snap.docs.forEach((doc) => {
-        const raw = doc.data() as Record<string, any>;
+        const raw = doc.data() as Record<string, unknown>;
         this.migrateIfUnencrypted(collectionName, raw);
         results.push(decryptDocumentFromStorage(collectionName, raw) as T);
       });
@@ -307,7 +307,7 @@ export class FirebaseService implements OnModuleInit {
   ): Promise<T> {
     const encryptedDoc = encryptDocumentForStorage(
       collectionName,
-      doc as Record<string, any>,
+      doc as Record<string, unknown>,
     );
     await this.collection(collectionName).doc(doc.id).set(encryptedDoc);
     return decryptDocumentFromStorage(collectionName, encryptedDoc) as T;
@@ -316,9 +316,9 @@ export class FirebaseService implements OnModuleInit {
   async updateDoc(
     collectionName: string,
     id: string,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
   ): Promise<void> {
-    const encryptedData: Record<string, any> = encryptDocumentForStorage(
+    const encryptedData: Record<string, unknown> = encryptDocumentForStorage(
       collectionName,
       {
         ...data,
@@ -509,7 +509,7 @@ export class FirebaseService implements OnModuleInit {
     },
   ): Promise<void> {
     const token = await this.getAdminAccessToken();
-    const body: Record<string, any> = { localId: uid };
+    const body: Record<string, string> = { localId: uid };
     if (updates.password !== undefined) body.password = updates.password;
     if (updates.email !== undefined) body.email = updates.email;
     if (updates.displayName !== undefined) {
@@ -609,7 +609,7 @@ export class FirebaseService implements OnModuleInit {
     continueUrl?: string,
   ): Promise<string> {
     const token = await this.getAdminAccessToken();
-    const payload: Record<string, any> = {
+    const payload: Record<string, string | boolean> = {
       requestType: 'PASSWORD_RESET',
       email: email.trim().toLowerCase(),
       returnOobLink: true,
@@ -681,7 +681,7 @@ export class FirebaseService implements OnModuleInit {
       }
       const encryptedUser = encryptDocumentForStorage(
         COLLECTIONS.USERS,
-        user as unknown as Record<string, any>,
+        user as unknown as Record<string, unknown>,
       );
       tx.set(userRef, encryptedUser);
     });
@@ -756,10 +756,13 @@ export class FirebaseService implements OnModuleInit {
       if (newCpfLockRef) {
         tx.set(newCpfLockRef, { userId, updatedAt: now });
       }
-      const encryptedUpdate = encryptDocumentForStorage(COLLECTIONS.USERS, {
-        ...updateData,
-        id: userId,
-      } as Record<string, any>);
+      const encryptedUpdate: Record<string, unknown> = encryptDocumentForStorage(
+        COLLECTIONS.USERS,
+        {
+          ...updateData,
+          id: userId,
+        } as Record<string, unknown>,
+      );
       delete encryptedUpdate.id;
       tx.update(userRef, encryptedUpdate);
     });

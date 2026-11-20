@@ -10,6 +10,7 @@ import {
   Request,
   UseGuards,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
@@ -23,19 +24,19 @@ export class ExpensesController {
   constructor(private readonly service: ExpensesService) {}
 
   @Get()
-  findAll(@Request() req: any, @Query('scope') scope?: string) {
+  findAll(@Request() req: AuthenticatedRequest, @Query('scope') scope?: string) {
     return this.service.findAll(req.user.userId, scope);
   }
 
   @Post()
-  create(@Body() dto: CreateExpenseDto, @Request() req: any) {
+  create(@Body() dto: CreateExpenseDto, @Request() req: AuthenticatedRequest) {
     return this.service.create(dto, req.user.userId);
   }
 
   @Post('credit-card/pay-invoice')
   payCreditCardInvoice(
     @Body() dto: PayCreditCardInvoiceDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
     return this.service.payCreditCardInvoice(req.user.userId, dto);
   }
@@ -44,13 +45,13 @@ export class ExpensesController {
   markAsPaid(
     @Param('id') id: string,
     @Body() dto: PayExpenseDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
     return this.service.markAsPaid(id, req.user.userId, dto);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Request() req: any) {
+  remove(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
     return this.service.remove(id, req.user.userId);
   }
 
@@ -58,7 +59,7 @@ export class ExpensesController {
   update(
     @Param('id') id: string,
     @Body() dto: UpdateExpenseDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
     return this.service.update(id, dto, req.user.userId);
   }

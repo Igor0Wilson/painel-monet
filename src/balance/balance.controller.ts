@@ -7,6 +7,7 @@ import {
   Request,
   UseGuards,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BalanceService } from './balance.service';
 import { UpdateEmergencyFundDto } from './dto/update-emergency-fund.dto';
@@ -19,13 +20,13 @@ export class BalanceController {
   constructor(private readonly service: BalanceService) {}
 
   @Get()
-  getBalance(@Request() req: any, @Query('scope') scope?: string) {
+  getBalance(@Request() req: AuthenticatedRequest, @Query('scope') scope?: string) {
     return this.service.getBalance(req.user.userId, scope);
   }
 
   @Get('charts')
   getCharts(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Query('month') month?: string,
     @Query('scope') scope?: string,
   ) {
@@ -34,19 +35,25 @@ export class BalanceController {
 
   @Post('emergency-fund')
   updateEmergencyFund(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Body() dto: UpdateEmergencyFundDto,
   ) {
     return this.service.updateEmergencyFund(req.user.userId, dto.amount);
   }
 
   @Post('investments')
-  updateInvestments(@Request() req: any, @Body() dto: UpdateInvestmentsDto) {
+  updateInvestments(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateInvestmentsDto,
+  ) {
     return this.service.updateInvestments(req.user.userId, dto.amount);
   }
 
   @Post('food-allowance')
-  updateFoodAllowance(@Request() req: any, @Body() dto: UpdateFoodAllowanceDto) {
+  updateFoodAllowance(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateFoodAllowanceDto,
+  ) {
     return this.service.updateFoodAllowance(
       req.user.userId,
       dto.amount,

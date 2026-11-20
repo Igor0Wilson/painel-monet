@@ -5,7 +5,16 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS, IncomeDoc } from '../firebase/firebase.types';
 import { CreateIncomeDto } from './dto/create-income.dto';
 import { UpdateIncomeDto } from './dto/update-income.dto';
-import { evaluateIncomeCredit } from './income.date-utils';
+import {
+  evaluateIncomeCredit,
+  IncomeCreditEvaluation,
+} from './income.date-utils';
+
+export interface IncomeWithEvaluation extends IncomeDoc, IncomeCreditEvaluation {
+  ownerId?: string;
+  ownerName?: string;
+  isOwn?: boolean;
+}
 
 @Injectable()
 export class IncomeService {
@@ -14,7 +23,7 @@ export class IncomeService {
     private readonly familyService: FamilyService,
   ) { }
 
-  async findAll(userId: string, scope?: string): Promise<any[]> {
+  async findAll(userId: string, scope?: string): Promise<IncomeWithEvaluation[]> {
     const authScope = await this.familyService.resolveAuthorizedScope(
       userId,
       scope,
@@ -41,7 +50,10 @@ export class IncomeService {
       });
   }
 
-  async create(dto: CreateIncomeDto, userId: string): Promise<any> {
+  async create(
+    dto: CreateIncomeDto,
+    userId: string,
+  ): Promise<IncomeWithEvaluation> {
     const now = new Date().toISOString();
     const income: IncomeDoc = {
       id: uuidv4(),
@@ -79,7 +91,7 @@ export class IncomeService {
     id: string,
     dto: UpdateIncomeDto,
     userId: string,
-  ): Promise<any> {
+  ): Promise<IncomeWithEvaluation> {
     const income = await this.firebase.findById<IncomeDoc>(
       COLLECTIONS.INCOME,
       id,

@@ -26,6 +26,15 @@ import { UpdateExpenseDto } from './dto/update-expense.dto';
 
 export type ExpenseStatus = 'pago' | 'em_atraso' | 'pendente';
 
+export interface ExpenseWithStatus extends ExpenseDoc {
+  status: ExpenseStatus;
+  accountType?: { id: string; name: string } | null;
+  ownerId?: string;
+  ownerName?: string;
+  isOwn?: boolean;
+  generatedInstallments?: ExpenseWithStatus[];
+}
+
 function isCreditCardCategoryName(name?: string | null): boolean {
   if (!name) return false;
   const normalized = name
@@ -86,7 +95,7 @@ export class ExpensesService {
     totalValue: number;
     installments: number;
     firstInstallmentDate: string;
-  }): Promise<any[]> {
+  }): Promise<ExpenseWithStatus[]> {
     const {
       userId,
       accountTypeId,
@@ -97,7 +106,7 @@ export class ExpensesService {
     } = params;
 
     const installmentValues = this.splitValueInCents(totalValue, installments);
-    const created: any[] = [];
+    const created: ExpenseWithStatus[] = [];
     const now = new Date().toISOString();
 
     if (installments === 1) {
@@ -156,7 +165,7 @@ export class ExpensesService {
     return created;
   }
 
-  async findAll(userId: string, scope?: string): Promise<any[]> {
+  async findAll(userId: string, scope?: string): Promise<ExpenseWithStatus[]> {
     const authScope = await this.familyService.resolveAuthorizedScope(
       userId,
       scope,
@@ -202,7 +211,10 @@ export class ExpensesService {
       });
   }
 
-  async create(dto: CreateExpenseDto, userId: string): Promise<any> {
+  async create(
+    dto: CreateExpenseDto,
+    userId: string,
+  ): Promise<ExpenseWithStatus | ExpenseWithStatus[]> {
     const accountType = await this.firebase.findById<AccountTypeDoc>(
       COLLECTIONS.ACCOUNT_TYPES,
       dto.accountTypeId,
@@ -211,7 +223,7 @@ export class ExpensesService {
       accountType?.userId === userId &&
       isCreditCardCategoryName(accountType?.name);
 
-    let result: any;
+    let result: ExpenseWithStatus | ExpenseWithStatus[];
 
     if (dto.paymentMethod === 'credito') {
       const installments =
@@ -277,9 +289,9 @@ export class ExpensesService {
     dto: CreateExpenseDto,
     userId: string,
     isCreditCard = true,
-  ): Promise<any[]> {
+  ): Promise<ExpenseWithStatus[]> {
     const parentId = uuidv4();
-    const parcelas: any[] = [];
+    const parcelas: ExpenseWithStatus[] = [];
     const count = dto.installmentCount!;
     const installmentValues = this.splitValueInCents(dto.value, count);
     const now = new Date().toISOString();
@@ -317,7 +329,7 @@ export class ExpensesService {
     id: string,
     userId: string,
     dto?: PayExpenseDto,
-  ): Promise<any> {
+  ): Promise<ExpenseWithStatus> {
     const expense = await this.firebase.findById<ExpenseDoc>(
       COLLECTIONS.EXPENSES,
       id,
@@ -487,7 +499,7 @@ export class ExpensesService {
     id: string,
     dto: UpdateExpenseDto,
     userId: string,
-  ): Promise<any> {
+  ): Promise<ExpenseWithStatus> {
     const expense = await this.firebase.findById<ExpenseDoc>(
       COLLECTIONS.EXPENSES,
       id,

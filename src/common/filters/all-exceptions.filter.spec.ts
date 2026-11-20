@@ -1,11 +1,16 @@
-import { BadRequestException, HttpStatus, Logger } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  BadRequestException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
 describe('AllExceptionsFilter', () => {
   let filter: AllExceptionsFilter;
   let statusMock: jest.Mock;
   let jsonMock: jest.Mock;
-  let hostMock: any;
+  let hostMock: ArgumentsHost;
 
   beforeEach(() => {
     filter = new AllExceptionsFilter();
@@ -16,7 +21,7 @@ describe('AllExceptionsFilter', () => {
         getResponse: () => ({ status: statusMock }),
         getRequest: () => ({ method: 'POST', url: '/expenses' }),
       }),
-    };
+    } as unknown as ArgumentsHost;
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
 

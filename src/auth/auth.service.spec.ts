@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
+import { FirebaseService } from '../firebase/firebase.service';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { EmailSenderService } from './email-sender.service';
@@ -18,7 +19,7 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
 
   beforeEach(() => {
     firebase = new InMemoryFirebaseService();
-    usersService = new UsersService(firebase as any);
+    usersService = new UsersService(firebase as unknown as FirebaseService);
     jwtService = new JwtService({
       secret: 'test-jwt-secret-key-32-chars-minimum',
       signOptions: { algorithm: 'HS256', expiresIn: '1h' },
@@ -27,7 +28,7 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
     authService = new AuthService(
       usersService,
       jwtService,
-      firebase as any,
+      firebase as unknown as FirebaseService,
       emailSender,
     );
   });
@@ -56,9 +57,12 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
       authTime: Math.floor(Date.now() / 1000),
     });
 
-    const result = (await authService.loginWithFirebase('valid-token')) as any;
+    const result = (await authService.loginWithFirebase('valid-token')) as {
+      requiresProfileCompletion?: boolean;
+      googleProfile?: { email: string };
+    };
     expect(result.requiresProfileCompletion).toBe(true);
-    expect(result.googleProfile.email).toBe('novo@gmail.com');
+    expect(result.googleProfile?.email).toBe('novo@gmail.com');
   });
 
   it('rolls back orphan Firebase Auth user when CPF already exists during registration', async () => {
@@ -130,7 +134,7 @@ describe('AuthService (100% Firebase Auth + Deactivation/Reactivation)', () => {
 
     const loginAfterReset = (await authService.loginWithFirebase(
       'token-after-reset',
-    )) as any;
+    )) as { reactivated?: boolean; access_token?: string };
     expect(loginAfterReset.reactivated).toBe(true);
     expect(loginAfterReset.access_token).toBeTruthy();
 

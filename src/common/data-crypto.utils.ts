@@ -102,7 +102,7 @@ export function isEncryptedCollectionField(
 
 export function hasUnencryptedSensitiveFields(
   collectionName: string,
-  doc: Record<string, any> | null | undefined,
+  doc: Record<string, unknown> | null | undefined,
 ): boolean {
   if (!doc || typeof doc !== 'object') return false;
   const strFields = ENCRYPTED_STRING_FIELDS[collectionName] || [];
@@ -123,7 +123,7 @@ export function hasUnencryptedSensitiveFields(
   return false;
 }
 
-export function encryptDocumentForStorage<T extends Record<string, any>>(
+export function encryptDocumentForStorage<T extends object>(
   collectionName: string,
   doc: T,
 ): T {
@@ -132,7 +132,7 @@ export function encryptDocumentForStorage<T extends Record<string, any>>(
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
   if (strFields.length === 0 && numFields.length === 0) return doc;
 
-  const clone: Record<string, any> = { ...doc };
+  const clone: Record<string, unknown> = { ...(doc as Record<string, unknown>) };
 
   for (const field of strFields) {
     const val = clone[field];
@@ -154,14 +154,14 @@ export function encryptDocumentForStorage<T extends Record<string, any>>(
   const ownerKey = String(clone.userId || clone.id || '');
   if (ownerKey) {
     clone.securityHash = computeDeterministicHash(
-      `${collectionName}:${ownerKey}:${clone.id || ''}`,
+      `${collectionName}:${ownerKey}:${String(clone.id || '')}`,
     );
   }
 
-  return clone as T;
+  return clone as unknown as T;
 }
 
-export function decryptDocumentFromStorage<T extends Record<string, any>>(
+export function decryptDocumentFromStorage<T extends object>(
   collectionName: string,
   doc: T | null | undefined,
 ): T | null {
@@ -170,7 +170,7 @@ export function decryptDocumentFromStorage<T extends Record<string, any>>(
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
   if (strFields.length === 0 && numFields.length === 0) return doc;
 
-  const clone: Record<string, any> = { ...doc };
+  const clone: Record<string, unknown> = { ...(doc as Record<string, unknown>) };
 
   for (const field of strFields) {
     const val = clone[field];
@@ -188,5 +188,5 @@ export function decryptDocumentFromStorage<T extends Record<string, any>>(
     }
   }
 
-  return clone as T;
+  return clone as unknown as T;
 }

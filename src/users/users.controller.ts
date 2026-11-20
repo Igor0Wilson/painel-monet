@@ -10,6 +10,7 @@ import {
   Request,
   UseGuards,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
@@ -22,7 +23,7 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get('me')
-  async me(@Request() req: any) {
+  async me(@Request() req: AuthenticatedRequest) {
     const user = await this.usersService.findById(req.user.userId);
     if (!user) {
       throw new NotFoundException('Usuário não encontrado');
@@ -38,7 +39,10 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Patch('me')
-  async updateProfile(@Request() req: any, @Body() dto: UpdateProfileDto) {
+  async updateProfile(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateProfileDto,
+  ) {
     const user = await this.usersService.updateProfile(req.user.userId, dto);
     return {
       id: user.id,
@@ -51,14 +55,17 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get('me/export')
-  async exportData(@Request() req: any, @Query('cpf') cpf?: string) {
+  async exportData(
+    @Request() req: AuthenticatedRequest,
+    @Query('cpf') cpf?: string,
+  ) {
     return this.usersService.exportAccountData(req.user.userId, cpf);
   }
 
   @UseGuards(JwtAuthGuard)
   @Post('me/deactivate')
   async deactivate(
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
     @Body() dto: DeactivateAccountDto,
   ) {
     return this.usersService.deactivateAccount(req.user.userId, dto.confirmed);
@@ -66,7 +73,10 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Delete('me')
-  async removeAccount(@Request() req: any, @Body() dto: DeleteAccountDto) {
+  async removeAccount(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: DeleteAccountDto,
+  ) {
     return this.usersService.deleteAccountPermanently(
       req.user.userId,
       dto.confirmed,

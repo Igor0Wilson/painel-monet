@@ -1,11 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
+import { FamilyService } from '../family/family.service';
+import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS } from '../firebase/firebase.types';
 import { BalanceService } from './balance.service';
 
 describe('BalanceService (Firestore)', () => {
   let firebase: InMemoryFirebaseService;
-  let familyService: any;
+  let familyService: Pick<
+    FamilyService,
+    'resolveAuthorizedScope' | 'notifyFamilyDataChanged'
+  >;
   let service: BalanceService;
 
   beforeEach(() => {
@@ -25,7 +30,10 @@ describe('BalanceService (Firestore)', () => {
       notifyFamilyDataChanged: jest.fn().mockResolvedValue(undefined),
     };
 
-    service = new BalanceService(firebase as any, familyService);
+    service = new BalanceService(
+      firebase as unknown as FirebaseService,
+      familyService as unknown as FamilyService,
+    );
   });
 
   it('computes balance deducting paid non-credit expenses, emergency fund, and investments', async () => {

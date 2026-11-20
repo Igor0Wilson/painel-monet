@@ -24,7 +24,7 @@ import { UsersModule } from '../users/users.module';
           secret,
           signOptions: {
             algorithm: 'HS256',
-            expiresIn: (process.env.JWT_EXPIRES_IN || '7d') as any,
+            expiresIn: 60 * 60 * 24 * 7,
           },
           verifyOptions: {
             algorithms: ['HS256'],

@@ -199,7 +199,14 @@ export class FamilyService {
         : null;
 
     let group: FamilyGroupDoc | null = null;
-    let members: any[] = [];
+    let members: Array<{
+      userId: string;
+      name: string;
+      maskedCpf: string;
+      phone: string | null;
+      role: 'owner' | 'member';
+      isSelf: boolean;
+    }> = [];
 
     if (membership) {
       const [groupDoc, groupMembers] = await Promise.all([

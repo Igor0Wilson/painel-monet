@@ -5,7 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InMemoryFirebaseService } from '../../test/__mocks__/firebase.service.mock';
+import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS } from '../firebase/firebase.types';
+import { FamilyEventsService } from './family-events.service';
 import { FamilyService } from './family.service';
 
 function makeCpf(base9: string): string {
@@ -28,13 +30,16 @@ describe('FamilyService (Firestore)', () => {
   const cpfB = makeCpf('987654321');
 
   let firebase: InMemoryFirebaseService;
-  let eventsService: any;
+  let eventsService: Pick<FamilyEventsService, 'emitToUsers'>;
   let service: FamilyService;
 
   beforeEach(async () => {
     firebase = new InMemoryFirebaseService();
     eventsService = { emitToUsers: jest.fn() };
-    service = new FamilyService(firebase as any, eventsService);
+    service = new FamilyService(
+      firebase as unknown as FirebaseService,
+      eventsService as unknown as FamilyEventsService,
+    );
 
     await firebase.setDoc(COLLECTIONS.USERS, {
       id: 'u-1',
