@@ -116,6 +116,7 @@ export class UsersService {
       deactivatedAt: null,
       deactivatedAtMs: null,
       emergencyFund: 0,
+      externalEmergencyFund: 0,
       investments: 0,
       externalInvestments: 0,
       foodAllowance: 0,
@@ -402,7 +403,9 @@ export class UsersService {
       };
     }).filter(Boolean);
 
-    const emergencyFund = Number(user.emergencyFund || 0);
+    const allocatedEmergencyFund = Number(user.emergencyFund || 0);
+    const externalEmergencyFund = Number(user.externalEmergencyFund || 0);
+    const emergencyFund = allocatedEmergencyFund + externalEmergencyFund;
     const allocatedInvestments = Number(user.investments || 0);
     const externalInvestments = Number(user.externalInvestments || 0);
     const investments = allocatedInvestments + externalInvestments;
@@ -415,7 +418,7 @@ export class UsersService {
       (
         totalCreditedIncome -
         totalCashPaidExpenses -
-        emergencyFund -
+        allocatedEmergencyFund -
         allocatedInvestments
       ).toFixed(2),
     );

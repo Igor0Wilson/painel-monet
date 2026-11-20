@@ -8,4 +8,8 @@ export class UpdateInvestmentsDto {
   @IsOptional()
   @IsBoolean()
   fromAvailableBalance?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  reclassifyAllocatedToExternal?: boolean;
 }

@@ -7,5 +7,6 @@ import { BalanceController } from './balance.controller';
   imports: [FamilyModule],
   providers: [BalanceService],
   controllers: [BalanceController],
+  exports: [BalanceService],
 })
 export class BalanceModule {}

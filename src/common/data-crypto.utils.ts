@@ -16,6 +16,7 @@ const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.EXPENSES]: ['value'],
   [COLLECTIONS.USERS]: [
     'emergencyFund',
+    'externalEmergencyFund',
     'investments',
     'externalInvestments',
     'foodAllowance',

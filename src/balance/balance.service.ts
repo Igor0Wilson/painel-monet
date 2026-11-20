@@ -25,8 +25,7 @@ export class BalanceService {
     private readonly familyService: FamilyService,
   ) {}
 
-  private computeUserMetrics(
-    user: UserDoc,
+  private computeCashAndIncome(
     userIncomes: IncomeDoc[],
     userExpenses: ExpenseDoc[],
     today = getTodayParts(),
@@ -53,8 +52,51 @@ export class BalanceService {
       }
     }
 
+    return {
+      totalIncome,
+      scheduledIncome,
+      cashExpenses,
+      foodAllowanceUsed,
+    };
+  }
+
+  private computeUncoveredShift(user: UserDoc, operatingCash: number) {
+    const allocRes = Number(user.emergencyFund || 0);
+    const extRes = Number(user.externalEmergencyFund || 0);
+    const allocInv = Number(user.investments || 0);
+    const extInv = Number(user.externalInvestments || 0);
+
+    const safeOperating = Math.max(0, Number(operatingCash.toFixed(2)));
+    const excess = Number((allocInv + allocRes - safeOperating).toFixed(2));
+    if (excess <= 0.001) {
+      return null;
+    }
+
+    const moveInv = Math.min(allocInv, excess);
+    const remExcess = Number((excess - moveInv).toFixed(2));
+    const moveRes = Math.min(allocRes, remExcess);
+
+    return {
+      investments: Number((allocInv - moveInv).toFixed(2)),
+      externalInvestments: Number((extInv + moveInv).toFixed(2)),
+      emergencyFund: Number((allocRes - moveRes).toFixed(2)),
+      externalEmergencyFund: Number((extRes + moveRes).toFixed(2)),
+    };
+  }
+
+  private computeUserMetrics(
+    user: UserDoc,
+    userIncomes: IncomeDoc[],
+    userExpenses: ExpenseDoc[],
+    today = getTodayParts(),
+  ) {
+    const { totalIncome, scheduledIncome, cashExpenses, foodAllowanceUsed } =
+      this.computeCashAndIncome(userIncomes, userExpenses, today);
+
     const totalExpenses = cashExpenses + foodAllowanceUsed;
-    const emergencyFund = Number(user.emergencyFund || 0);
+    const allocatedEmergencyFund = Number(user.emergencyFund || 0);
+    const externalEmergencyFund = Number(user.externalEmergencyFund || 0);
+    const emergencyFund = allocatedEmergencyFund + externalEmergencyFund;
     const allocatedInvestments = Number(user.investments || 0);
     const externalInvestments = Number(user.externalInvestments || 0);
     const investments = allocatedInvestments + externalInvestments;
@@ -88,7 +130,10 @@ export class BalanceService {
       Number((foodAllowanceTotal - foodAllowanceUsed).toFixed(2)),
     );
     const balance =
-      totalIncome - cashExpenses - emergencyFund - allocatedInvestments;
+      totalIncome -
+      cashExpenses -
+      allocatedEmergencyFund -
+      allocatedInvestments;
 
     return {
       balance: Number(balance.toFixed(2)),
@@ -96,6 +141,8 @@ export class BalanceService {
       scheduledIncome: Number(scheduledIncome.toFixed(2)),
       totalExpenses: Number(totalExpenses.toFixed(2)),
       emergencyFund: Number(emergencyFund.toFixed(2)),
+      allocatedEmergencyFund: Number(allocatedEmergencyFund.toFixed(2)),
+      externalEmergencyFund: Number(externalEmergencyFund.toFixed(2)),
       investments: Number(investments.toFixed(2)),
       allocatedInvestments: Number(allocatedInvestments.toFixed(2)),
       externalInvestments: Number(externalInvestments.toFixed(2)),
@@ -135,20 +182,52 @@ export class BalanceService {
       ),
     ]);
 
-    const memberBreakdown = users.map((u) => {
-      const uIncomes = incomes.filter((i) => i.userId === u.id);
-      const uExpenses = expenses.filter((e) => e.userId === u.id);
-      const metrics = this.computeUserMetrics(u, uIncomes, uExpenses, today);
-      const info = authScope.userMap.get(u.id);
-      return {
-        userId: u.id,
-        name: u.name,
-        maskedCpf: info?.maskedCpf || '***.***.***-**',
-        phone: u.phone || null,
-        isSelf: u.id === userId,
-        ...metrics,
-      };
-    });
+    const memberBreakdown = await Promise.all(
+      users.map(async (u) => {
+        const uIncomes = incomes.filter((i) => i.userId === u.id);
+        const uExpenses = expenses.filter((e) => e.userId === u.id);
+
+        let effectiveUser = u;
+        const isLegacySavingsUser =
+          u.externalInvestments === undefined ||
+          u.externalEmergencyFund === undefined;
+
+        if (isLegacySavingsUser) {
+          const { totalIncome, cashExpenses } = this.computeCashAndIncome(
+            uIncomes,
+            uExpenses,
+            today,
+          );
+          const shift = this.computeUncoveredShift(
+            u,
+            totalIncome - cashExpenses,
+          );
+          if (shift) {
+            await this.firebase.updateDoc(COLLECTIONS.USERS, u.id, {
+              ...shift,
+              updatedAt: new Date().toISOString(),
+            });
+            effectiveUser = { ...u, ...shift };
+          }
+        }
+
+        const metrics = this.computeUserMetrics(
+          effectiveUser,
+          uIncomes,
+          uExpenses,
+          today,
+        );
+        const info = authScope.userMap.get(u.id);
+        return {
+          userId: u.id,
+          name: u.name,
+          maskedCpf: info?.maskedCpf || '***.***.***-**',
+          phone: u.phone || null,
+          isSelf: u.id === userId,
+          ...metrics,
+        };
+      }),
+    );
 
     const totals = memberBreakdown.reduce(
       (acc, m) => ({
@@ -157,6 +236,10 @@ export class BalanceService {
         scheduledIncome: acc.scheduledIncome + m.scheduledIncome,
         totalExpenses: acc.totalExpenses + m.totalExpenses,
         emergencyFund: acc.emergencyFund + m.emergencyFund,
+        allocatedEmergencyFund:
+          acc.allocatedEmergencyFund + m.allocatedEmergencyFund,
+        externalEmergencyFund:
+          acc.externalEmergencyFund + m.externalEmergencyFund,
         investments: acc.investments + m.investments,
         allocatedInvestments: acc.allocatedInvestments + m.allocatedInvestments,
         externalInvestments: acc.externalInvestments + m.externalInvestments,
@@ -172,6 +255,8 @@ export class BalanceService {
         scheduledIncome: 0,
         totalExpenses: 0,
         emergencyFund: 0,
+        allocatedEmergencyFund: 0,
+        externalEmergencyFund: 0,
         investments: 0,
         allocatedInvestments: 0,
         externalInvestments: 0,
@@ -191,6 +276,8 @@ export class BalanceService {
       scheduledIncome: Number(totals.scheduledIncome.toFixed(2)),
       totalExpenses: Number(totals.totalExpenses.toFixed(2)),
       emergencyFund: Number(totals.emergencyFund.toFixed(2)),
+      allocatedEmergencyFund: Number(totals.allocatedEmergencyFund.toFixed(2)),
+      externalEmergencyFund: Number(totals.externalEmergencyFund.toFixed(2)),
       investments: Number(totals.investments.toFixed(2)),
       allocatedInvestments: Number(totals.allocatedInvestments.toFixed(2)),
       externalInvestments: Number(totals.externalInvestments.toFixed(2)),
@@ -200,6 +287,8 @@ export class BalanceService {
       foodAllowanceUsed: Number(totals.foodAllowanceUsed.toFixed(2)),
       ownBalance: selfMetrics?.balance ?? 0,
       ownEmergencyFund: selfMetrics?.emergencyFund ?? 0,
+      ownAllocatedEmergencyFund: selfMetrics?.allocatedEmergencyFund ?? 0,
+      ownExternalEmergencyFund: selfMetrics?.externalEmergencyFund ?? 0,
       ownInvestments: selfMetrics?.investments ?? 0,
       ownAllocatedInvestments: selfMetrics?.allocatedInvestments ?? 0,
       ownExternalInvestments: selfMetrics?.externalInvestments ?? 0,
@@ -215,67 +304,134 @@ export class BalanceService {
     };
   }
 
-  async updateEmergencyFund(userId: string, amount: number) {
+  async reconcileSavingsOnIncomeChange(userId: string): Promise<void> {
+    const [user, userIncomes, userExpenses] = await Promise.all([
+      this.firebase.findById<UserDoc>(COLLECTIONS.USERS, userId),
+      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
+      this.firebase.findByField<ExpenseDoc>(
+        COLLECTIONS.EXPENSES,
+        'userId',
+        userId,
+      ),
+    ]);
+    if (!user) return;
+
+    const { totalIncome, cashExpenses } = this.computeCashAndIncome(
+      userIncomes,
+      userExpenses,
+    );
+    const shift = this.computeUncoveredShift(user, totalIncome - cashExpenses);
+    if (!shift) return;
+
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      ...shift,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private async updateSavingsBucket(params: {
+    userId: string;
+    amount: number;
+    fromAvailableBalance: boolean;
+    reclassifyAllocatedToExternal: boolean;
+    allocatedField: 'emergencyFund' | 'investments';
+    externalField: 'externalEmergencyFund' | 'externalInvestments';
+    negativeErrorMessage: string;
+    exceedErrorMessage: string;
+  }) {
+    const {
+      userId,
+      amount,
+      fromAvailableBalance,
+      reclassifyAllocatedToExternal,
+      allocatedField,
+      externalField,
+      negativeErrorMessage,
+      exceedErrorMessage,
+    } = params;
+
+    if (amount < 0) {
+      throw new BadRequestException(negativeErrorMessage);
+    }
+
     const user = await this.firebase.findById<UserDoc>(
       COLLECTIONS.USERS,
       userId,
     );
     if (user) {
-      const current = await this.getBalance(userId, 'individual');
-      const maxAllowed = Number(
-        (current.ownBalance + current.ownEmergencyFund).toFixed(2),
-      );
-      if (amount > maxAllowed + 0.001) {
-        throw new BadRequestException(
-          'A reserva de emergência não pode exceder o seu patrimônio disponível.',
+      const now = new Date().toISOString();
+      if (reclassifyAllocatedToExternal) {
+        const currentAlloc = Number(user[allocatedField] || 0);
+        const currentExt = Number(user[externalField] || 0);
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          [allocatedField]: 0,
+          [externalField]: Number((currentExt + currentAlloc).toFixed(2)),
+          updatedAt: now,
+        });
+      } else if (fromAvailableBalance) {
+        const current = await this.getBalance(userId, 'individual');
+        const currentAlloc =
+          allocatedField === 'emergencyFund'
+            ? current.ownAllocatedEmergencyFund
+            : current.ownAllocatedInvestments;
+        const maxAllowed = Number(
+          (current.ownBalance + currentAlloc).toFixed(2),
         );
+        if (amount > currentAlloc + 0.001 && amount > maxAllowed + 0.001) {
+          throw new BadRequestException(exceedErrorMessage);
+        }
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          [allocatedField]: Number(amount),
+          updatedAt: now,
+        });
+      } else {
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          [externalField]: Number(amount),
+          updatedAt: now,
+        });
       }
-      await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
-        emergencyFund: Number(amount),
-        updatedAt: new Date().toISOString(),
-      });
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
     }
+
     return this.getBalance(userId, 'individual');
+  }
+
+  async updateEmergencyFund(
+    userId: string,
+    amount: number,
+    fromAvailableBalance = true,
+    reclassifyAllocatedToExternal = false,
+  ) {
+    return this.updateSavingsBucket({
+      userId,
+      amount,
+      fromAvailableBalance,
+      reclassifyAllocatedToExternal,
+      allocatedField: 'emergencyFund',
+      externalField: 'externalEmergencyFund',
+      negativeErrorMessage: 'O valor da reserva não pode ser negativo.',
+      exceedErrorMessage:
+        'A reserva de emergência alocada do saldo não pode exceder o seu patrimônio disponível. Para registrar reserva já existente, selecione "Já existente".',
+    });
   }
 
   async updateInvestments(
     userId: string,
     amount: number,
     fromAvailableBalance = true,
+    reclassifyAllocatedToExternal = false,
   ) {
-    if (amount < 0) {
-      throw new BadRequestException('O valor em investimentos não pode ser negativo.');
-    }
-
-    const user = await this.firebase.findById<UserDoc>(
-      COLLECTIONS.USERS,
+    return this.updateSavingsBucket({
       userId,
-    );
-    if (user) {
-      if (fromAvailableBalance) {
-        const current = await this.getBalance(userId, 'individual');
-        const maxAllowed = Number(
-          (current.ownBalance + current.ownAllocatedInvestments).toFixed(2),
-        );
-        if (amount > maxAllowed + 0.001) {
-          throw new BadRequestException(
-            'O valor em investimentos descontado do saldo do mês não pode exceder o seu patrimônio disponível. Para registrar investimentos já existentes, selecione "Investimento já existente".',
-          );
-        }
-        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
-          investments: Number(amount),
-          updatedAt: new Date().toISOString(),
-        });
-      } else {
-        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
-          externalInvestments: Number(amount),
-          updatedAt: new Date().toISOString(),
-        });
-      }
-      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
-    }
-    return this.getBalance(userId, 'individual');
+      amount,
+      fromAvailableBalance,
+      reclassifyAllocatedToExternal,
+      allocatedField: 'investments',
+      externalField: 'externalInvestments',
+      negativeErrorMessage: 'O valor em investimentos não pode ser negativo.',
+      exceedErrorMessage:
+        'O valor em investimentos descontado do saldo do mês não pode exceder o seu patrimônio disponível. Para registrar investimentos já existentes, selecione "Carteira já existente".',
+    });
   }
 
   async updateFoodAllowance(

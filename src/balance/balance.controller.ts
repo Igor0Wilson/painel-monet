@@ -38,7 +38,12 @@ export class BalanceController {
     @Request() req: AuthenticatedRequest,
     @Body() dto: UpdateEmergencyFundDto,
   ) {
-    return this.service.updateEmergencyFund(req.user.userId, dto.amount);
+    return this.service.updateEmergencyFund(
+      req.user.userId,
+      dto.amount,
+      dto.fromAvailableBalance ?? true,
+      dto.reclassifyAllocatedToExternal ?? false,
+    );
   }
 
   @Post('investments')
@@ -50,6 +55,7 @@ export class BalanceController {
       req.user.userId,
       dto.amount,
       dto.fromAvailableBalance ?? true,
+      dto.reclassifyAllocatedToExternal ?? false,
     );
   }
 

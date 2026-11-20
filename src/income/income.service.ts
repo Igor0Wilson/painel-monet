@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID as uuidv4 } from 'crypto';
+import { BalanceService } from '../balance/balance.service';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { COLLECTIONS, IncomeDoc } from '../firebase/firebase.types';
@@ -21,6 +22,7 @@ export class IncomeService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly familyService: FamilyService,
+    @Optional() private readonly balanceService?: BalanceService,
   ) { }
 
   async findAll(userId: string, scope?: string): Promise<IncomeWithEvaluation[]> {
@@ -84,6 +86,7 @@ export class IncomeService {
       throw new NotFoundException('Renda não encontrada');
     }
     await this.firebase.deleteDoc(COLLECTIONS.INCOME, id);
+    await this.balanceService?.reconcileSavingsOnIncomeChange(userId);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
   }
 
@@ -111,6 +114,7 @@ export class IncomeService {
     if (dto.incomeDate !== undefined) updateData.incomeDate = dto.incomeDate;
 
     await this.firebase.updateDoc(COLLECTIONS.INCOME, id, updateData);
+    await this.balanceService?.reconcileSavingsOnIncomeChange(userId);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
     const updated = { ...income, ...updateData };

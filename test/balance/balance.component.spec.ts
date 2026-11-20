@@ -8,6 +8,7 @@ import { BalanceModule } from '../../src/balance/balance.module';
 import { FirebaseModule } from '../../src/firebase/firebase.module';
 import { FirebaseService } from '../../src/firebase/firebase.service';
 import { COLLECTIONS } from '../../src/firebase/firebase.types';
+import { IncomeModule } from '../../src/income/income.module';
 import { InMemoryFirebaseService } from '../__mocks__/firebase.service.mock';
 
 describe('Balance HTTP Component (Controller + Service + ValidationPipe)', () => {
@@ -35,7 +36,7 @@ describe('Balance HTTP Component (Controller + Service + ValidationPipe)', () =>
     });
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [FirebaseModule, BalanceModule],
+      imports: [FirebaseModule, BalanceModule, IncomeModule],
     })
       .overrideProvider(FirebaseService)
       .useValue(firebase)
@@ -108,5 +109,37 @@ describe('Balance HTTP Component (Controller + Service + ValidationPipe)', () =>
     expect(res.body.externalInvestments).toBe(50000);
     expect(res.body.investments).toBe(50000);
     expect(res.body.balance).toBe(0);
+  });
+
+  it('prevents negative balance when deleting a past income after investing from available balance', async () => {
+    const incomeRes = await request(app.getHttpServer())
+      .post('/income')
+      .send({
+        name: 'Saldo Passado QA',
+        value: 10000,
+        incomeDate: '2026-10-01',
+        isRecurring: false,
+      })
+      .expect(201);
+
+    const createdIncomeId = incomeRes.body.id as string;
+
+    await request(app.getHttpServer())
+      .post('/balance/investments')
+      .send({ amount: 10000, fromAvailableBalance: true })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .delete(`/income/${createdIncomeId}`)
+      .expect(200);
+
+    const balanceAfterDelete = await request(app.getHttpServer())
+      .get('/balance?scope=individual')
+      .expect(200);
+
+    expect(balanceAfterDelete.body.balance).toBe(0);
+    expect(balanceAfterDelete.body.investments).toBe(10000);
+    expect(balanceAfterDelete.body.allocatedInvestments).toBe(0);
+    expect(balanceAfterDelete.body.externalInvestments).toBe(10000);
   });
 });

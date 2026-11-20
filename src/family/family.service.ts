@@ -391,7 +391,8 @@ export class FamilyService {
       0,
     );
     const reserveSum = users.reduce(
-      (acc, u) => acc + Number(u.emergencyFund || 0),
+      (acc, u) =>
+        acc + Number(u.emergencyFund || 0) + Number(u.externalEmergencyFund || 0),
       0,
     );
     const invSum = users.reduce(

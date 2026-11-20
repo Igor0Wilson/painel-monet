@@ -263,4 +263,70 @@ describe('BalanceService (Firestore)', () => {
     expect(updated.investments).toBe(25200);
     expect(updated.balance).toBe(800);
   });
+
+  it('self-heals legacy users with negative balance caused by invested funds after income removal', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-1',
+      name: 'Igor',
+      email: 'igor@test.com',
+      password: 'hash',
+      cpf: null,
+      phone: null,
+      emergencyFund: 0,
+      investments: 10000,
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    const healed = await service.getBalance('u-1', 'individual');
+
+    expect(healed.balance).toBe(0);
+    expect(healed.investments).toBe(10000);
+    expect(healed.allocatedInvestments).toBe(0);
+    expect(healed.externalInvestments).toBe(10000);
+  });
+
+  it('supports pre-existing emergency fund, reclassifying to external, and redeeming while negative', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-1',
+      name: 'Igor',
+      email: 'igor@test.com',
+      password: 'hash',
+      cpf: null,
+      phone: null,
+      emergencyFund: 3000,
+      externalEmergencyFund: 0,
+      investments: 0,
+      externalInvestments: 0,
+      createdAt: '',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.INCOME, {
+      id: 'inc-1',
+      userId: 'u-1',
+      name: 'Salário',
+      value: 2000,
+      incomeDate: '2020-01-01',
+      isRecurring: false,
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    // Can still decrease allocated emergency fund even when balance is -1000
+    const redeemed = await service.updateEmergencyFund('u-1', 1500, true, false);
+    expect(redeemed.balance).toBe(500);
+    expect(redeemed.allocatedEmergencyFund).toBe(1500);
+
+    // Move remaining allocated reserve to pre-existing/external without losing reserve
+    const moved = await service.updateEmergencyFund('u-1', 0, false, true);
+    expect(moved.balance).toBe(2000);
+    expect(moved.allocatedEmergencyFund).toBe(0);
+    expect(moved.externalEmergencyFund).toBe(1500);
+    expect(moved.emergencyFund).toBe(1500);
+
+    // Pre-existing emergency fund has no limit cap
+    const preExisting = await service.updateEmergencyFund('u-1', 15000, false, false);
+    expect(preExisting.externalEmergencyFund).toBe(15000);
+    expect(preExisting.balance).toBe(2000);
+  });
 });

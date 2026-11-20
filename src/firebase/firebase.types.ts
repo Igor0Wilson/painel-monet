@@ -10,6 +10,7 @@ export interface UserDoc {
   deactivatedAt: string | null;
   deactivatedAtMs: number | null;
   emergencyFund: number;
+  externalEmergencyFund?: number;
   investments: number;
   externalInvestments?: number;
   foodAllowance?: number;
