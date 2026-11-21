@@ -11,6 +11,8 @@ export const DEFAULT_ACCOUNT_TYPES = [
   'Alimentação',
   'FastFood',
   'Saúde e Beleza',
+  'Móveis e Eletrônicos',
+  'Dívidas',
   'Diversos',
 ];
 
@@ -84,6 +86,30 @@ export function normalizeOfficialCategory(rawName?: string | null): string {
     norm.includes('cosmetico')
   ) {
     return 'Saúde e Beleza';
+  }
+  if (
+    norm.includes('moveis') ||
+    norm.includes('movel') ||
+    norm.includes('eletron') ||
+    norm.includes('eletro') ||
+    norm.includes('notebook') ||
+    norm.includes('computador') ||
+    norm.includes('celular') ||
+    norm.includes('geladeira') ||
+    norm.includes('sofa') ||
+    norm.includes('televisao') ||
+    norm.includes('monitor')
+  ) {
+    return 'Móveis e Eletrônicos';
+  }
+  if (
+    norm.includes('divida') ||
+    norm.includes('emprestimo') ||
+    norm.includes('financiamento') ||
+    norm.includes('acordo') ||
+    norm.includes('renegociacao')
+  ) {
+    return 'Dívidas';
   }
   return 'Diversos';
 }

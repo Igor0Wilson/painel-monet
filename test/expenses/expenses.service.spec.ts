@@ -243,4 +243,49 @@ describe('ExpensesService (Firestore)', () => {
       }),
     ).rejects.toThrow(NotFoundException);
   });
+
+  it('pays selected unpaid expenses in batch and calculates totalPaid accurately', async () => {
+    const e1 = (await service.create(
+      {
+        name: 'Sofá parcela',
+        accountTypeId: 'cat-1',
+        value: 350.5,
+        dueDate: '2026-11-10',
+        isRecurring: false,
+      },
+      'u-1',
+    )) as ExpenseWithStatus;
+    const e2 = (await service.create(
+      {
+        name: 'Acordo banco',
+        accountTypeId: 'cat-1',
+        value: 149.5,
+        dueDate: '2026-11-12',
+        isRecurring: false,
+      },
+      'u-1',
+    )) as ExpenseWithStatus;
+    const alreadyPaid = (await service.create(
+      {
+        name: 'Café',
+        accountTypeId: 'cat-1',
+        value: 20,
+        dueDate: '2026-11-15',
+        isRecurring: false,
+        isPaid: true,
+        paymentMethod: 'pix',
+      },
+      'u-1',
+    )) as ExpenseWithStatus;
+
+    const batchRes = await service.payBatch('u-1', {
+      expenseIds: [e1.id, e2.id, alreadyPaid.id],
+      paymentMethod: 'pix',
+    });
+
+    expect(batchRes.paidCount).toBe(2);
+    expect(batchRes.totalPaid).toBe(500);
+    expect(batchRes.paymentMethod).toBe('pix');
+    expect(batchRes.paidIds).toEqual([e1.id, e2.id]);
+  });
 });

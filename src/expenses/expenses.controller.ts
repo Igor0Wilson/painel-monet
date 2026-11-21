@@ -16,6 +16,7 @@ import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
+import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
 
 @UseGuards(JwtAuthGuard)
@@ -39,6 +40,14 @@ export class ExpensesController {
     @Request() req: AuthenticatedRequest,
   ) {
     return this.service.payCreditCardInvoice(req.user.userId, dto);
+  }
+
+  @Post('pay-batch')
+  payBatch(
+    @Body() dto: PayExpensesBatchDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.service.payBatch(req.user.userId, dto);
   }
 
   @Patch(':id/pay')

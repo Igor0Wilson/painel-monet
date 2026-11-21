@@ -22,6 +22,7 @@ import {
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
+import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 
 export type ExpenseStatus = 'pago' | 'em_atraso' | 'pendente';
@@ -474,6 +475,84 @@ export class ExpensesService {
     return {
       month: dto.month,
       paidCount: matching.length,
+      totalPaid: Number(totalPaid.toFixed(2)),
+      paymentMethod,
+      paidIds,
+    };
+  }
+
+  async payBatch(
+    userId: string,
+    dto: PayExpensesBatchDto,
+  ): Promise<{
+    paidCount: number;
+    totalPaid: number;
+    paymentMethod: string;
+    paidIds: string[];
+  }> {
+    const paymentMethod = dto.paymentMethod;
+    if (paymentMethod === 'credito') {
+      if (!dto.installments || dto.installments < 1) {
+        throw new BadRequestException(
+          'Informe em quantas vezes o pagamento no cartão de crédito foi parcelado.',
+        );
+      }
+      if (!dto.firstInstallmentDate) {
+        throw new BadRequestException(
+          'Informe a data de vencimento da primeira parcela do cartão de crédito.',
+        );
+      }
+    }
+
+    const uniqueIds = Array.from(new Set(dto.expenseIds));
+    const docs = await Promise.all(
+      uniqueIds.map((id) =>
+        this.firebase.findById<ExpenseDoc>(COLLECTIONS.EXPENSES, id),
+      ),
+    );
+
+    const targets = docs.filter(
+      (exp): exp is ExpenseDoc =>
+        Boolean(exp) && exp!.userId === userId && !exp!.isPaid,
+    );
+
+    if (targets.length === 0) {
+      throw new BadRequestException(
+        'Nenhuma despesa em aberto encontrada para liquidação em lote.',
+      );
+    }
+
+    const now = new Date().toISOString();
+    let totalPaid = 0;
+    const paidIds: string[] = [];
+
+    for (const expense of targets) {
+      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
+        isPaid: true,
+        paymentMethod,
+        updatedAt: now,
+      });
+
+      if (paymentMethod === 'credito') {
+        const baseName = expense.name.replace(/\s*\(\d+\/\d+\)\s*$/, '').trim();
+        await this.createCreditCardEntries({
+          userId,
+          accountTypeId: expense.accountTypeId,
+          baseName,
+          totalValue: Number(expense.value),
+          installments: dto.installments!,
+          firstInstallmentDate: dto.firstInstallmentDate!,
+        });
+      }
+
+      totalPaid += Number(expense.value);
+      paidIds.push(expense.id);
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    return {
+      paidCount: paidIds.length,
       totalPaid: Number(totalPaid.toFixed(2)),
       paymentMethod,
       paidIds,

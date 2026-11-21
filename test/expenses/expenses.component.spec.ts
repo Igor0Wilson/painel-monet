@@ -147,4 +147,40 @@ describe('Expenses HTTP Component (Controller + Service + ValidationPipe)', () =
     expect(patchRes.body.installmentCount).toBe(3);
     expect(patchRes.body.value).toBe(200);
   });
+
+  it('pays selected expenses in batch via POST /expenses/pay-batch', async () => {
+    const firstRes = await request(app.getHttpServer())
+      .post('/expenses')
+      .send({
+        name: 'Empréstimo 1',
+        accountTypeId: 'cat-food',
+        value: 250,
+        dueDate: '2026-11-10',
+        isRecurring: false,
+      })
+      .expect(201);
+
+    const secondRes = await request(app.getHttpServer())
+      .post('/expenses')
+      .send({
+        name: 'Notebook parcelado',
+        accountTypeId: 'cat-food',
+        value: 750,
+        dueDate: '2026-11-15',
+        isRecurring: false,
+      })
+      .expect(201);
+
+    const batchRes = await request(app.getHttpServer())
+      .post('/expenses/pay-batch')
+      .send({
+        expenseIds: [firstRes.body.id, secondRes.body.id],
+        paymentMethod: 'debito',
+      })
+      .expect(201);
+
+    expect(batchRes.body.paidCount).toBe(2);
+    expect(batchRes.body.totalPaid).toBe(1000);
+    expect(batchRes.body.paymentMethod).toBe('debito');
+  });
 });
