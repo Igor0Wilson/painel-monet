@@ -288,4 +288,78 @@ describe('ExpensesService (Firestore)', () => {
     expect(batchRes.paymentMethod).toBe('pix');
     expect(batchRes.paidIds).toEqual([e1.id, e2.id]);
   });
+
+  it('supports partial payment on creation and incremental partial settlements with custom dates and undo payment', async () => {
+    const partialOnCreate = (await service.create(
+      {
+        name: 'Parcela Faculdade',
+        accountTypeId: 'cat-1',
+        value: 1000,
+        dueDate: '2099-12-10',
+        isRecurring: false,
+        paidAmount: 400,
+        paidAt: '2026-11-05',
+        paymentMethod: 'pix',
+      },
+      'u-1',
+    )) as ExpenseWithStatus;
+
+    expect(partialOnCreate.isPaid).toBe(false);
+    expect(partialOnCreate.isPartiallyPaid).toBe(true);
+    expect(partialOnCreate.paidAmount).toBe(400);
+    expect(partialOnCreate.remainingAmount).toBe(600);
+    expect(partialOnCreate.paidAt).toBe('2026-11-05');
+    expect(partialOnCreate.status).toBe('pendente');
+    expect(partialOnCreate.payments).toHaveLength(1);
+
+    const secondPart = await service.markAsPaid(partialOnCreate.id, 'u-1', {
+      amount: 250,
+      paidAt: '2026-11-12',
+      paymentMethod: 'debito',
+    });
+
+    expect(secondPart.isPaid).toBe(false);
+    expect(secondPart.isPartiallyPaid).toBe(true);
+    expect(secondPart.paidAmount).toBe(650);
+    expect(secondPart.remainingAmount).toBe(350);
+    expect(secondPart.payments).toHaveLength(2);
+    expect(secondPart.payments[1].paidAt).toBe('2026-11-12');
+
+    // Paying more than remaining balance is rejected
+    await expect(
+      service.markAsPaid(partialOnCreate.id, 'u-1', {
+        amount: 500,
+        paidAt: '2026-11-15',
+        paymentMethod: 'pix',
+      }),
+    ).rejects.toThrow(BadRequestException);
+
+    // Undo single payment part
+    const afterUndoPart = await service.undoPayment(partialOnCreate.id, 'u-1', {
+      paymentId: secondPart.payments[1].id,
+    });
+    expect(afterUndoPart.isPaid).toBe(false);
+    expect(afterUndoPart.paidAmount).toBe(400);
+    expect(afterUndoPart.remainingAmount).toBe(600);
+
+    // Settle remaining completely
+    const settled = await service.markAsPaid(partialOnCreate.id, 'u-1', {
+      paidAt: '2026-11-20',
+      paymentMethod: 'dinheiro',
+    });
+    expect(settled.isPaid).toBe(true);
+    expect(settled.isPartiallyPaid).toBe(false);
+    expect(settled.paidAmount).toBe(1000);
+    expect(settled.remainingAmount).toBe(0);
+    expect(settled.status).toBe('pago');
+
+    // Full undo payment restores bill back to open
+    const afterFullUndo = await service.undoPayment(partialOnCreate.id, 'u-1');
+    expect(afterFullUndo.isPaid).toBe(false);
+    expect(afterFullUndo.isPartiallyPaid).toBe(false);
+    expect(afterFullUndo.paidAmount).toBe(0);
+    expect(afterFullUndo.remainingAmount).toBe(1000);
+    expect(afterFullUndo.payments).toEqual([]);
+    expect(afterFullUndo.status).toBe('pendente');
+  });
 });

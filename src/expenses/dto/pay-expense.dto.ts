@@ -2,7 +2,9 @@ import {
   IsDateString,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
@@ -15,6 +17,17 @@ export class PayExpenseDto {
     message: 'Forma de pagamento inválida. Use: dinheiro, pix, debito, credito, va ou vr.',
   })
   paymentMethod?: PaymentMethod;
+
+  @IsOptional()
+  @IsNumber({}, { message: 'Informe um valor numérico válido.' })
+  @Min(0.01, { message: 'O valor do pagamento deve ser maior que zero.' })
+  amount?: number;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Informe a data do pagamento no formato YYYY-MM-DD.',
+  })
+  paidAt?: string;
 
   @IsOptional()
   @IsInt({ message: 'O número de parcelas deve ser um número inteiro.' })

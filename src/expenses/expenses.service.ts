@@ -9,19 +9,24 @@ import { randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
 import { AuditService } from '../common/audit.service';
 import {
+  buildProtectedMediaPath,
   CloudinaryService,
   type UploadedImageFile,
 } from '../common/cloudinary.service';
+import type { DecryptedMediaPayload } from '../common/data-crypto.utils';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   AccountTypeDoc,
   COLLECTIONS,
   ExpenseDoc,
+  ExpensePaymentMethod,
+  ExpensePaymentPart,
 } from '../firebase/firebase.types';
 import {
   addMonthsDateOnly,
   compareDateParts,
+  formatDateOnly,
   getDaysInMonth,
   getTodayParts,
   parseDateOnly,
@@ -30,12 +35,18 @@ import { CreateExpenseDto } from './dto/create-expense.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
 import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
+import { UndoPaymentDto } from './dto/undo-payment.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 
 export type ExpenseStatus = 'pago' | 'em_atraso' | 'pendente';
 
 export interface ExpenseWithStatus extends ExpenseDoc {
   status: ExpenseStatus;
+  paidAmount: number;
+  remainingAmount: number;
+  isPartiallyPaid: boolean;
+  paidAt: string | null;
+  payments: ExpensePaymentPart[];
   accountType?: { id: string; name: string } | null;
   ownerId?: string;
   ownerName?: string;
@@ -98,6 +109,102 @@ export class ExpensesService {
     return values;
   }
 
+  private resolveExpensePaymentSummary(expense: ExpenseDoc): {
+    totalValue: number;
+    paidAmount: number;
+    remainingAmount: number;
+    isPaid: boolean;
+    isPartiallyPaid: boolean;
+    paidAt: string | null;
+    payments: ExpensePaymentPart[];
+  } {
+    const totalValue = Number(Number(expense.value || 0).toFixed(2));
+    const rawPayments = Array.isArray(expense.payments) ? expense.payments : [];
+    const sortedPayments = [...rawPayments]
+      .filter((p) => p && Number(p.amount) > 0)
+      .map((p) => ({
+        id: String(p.id || uuidv4()),
+        amount: Number(Number(p.amount).toFixed(2)),
+        paidAt: String(p.paidAt || '').split('T')[0],
+        paymentMethod: (p.paymentMethod || 'dinheiro') as ExpensePaymentMethod,
+        createdAt: p.createdAt,
+      }))
+      .sort((a, b) => a.paidAt.localeCompare(b.paidAt));
+
+    let paidAmount: number;
+    if (sortedPayments.length > 0) {
+      paidAmount = Number(
+        sortedPayments.reduce((sum, p) => sum + p.amount, 0).toFixed(2),
+      );
+    } else if (
+      expense.paidAmount !== undefined &&
+      expense.paidAmount !== null &&
+      Number(expense.paidAmount) > 0
+    ) {
+      paidAmount = Number(Number(expense.paidAmount).toFixed(2));
+    } else {
+      paidAmount = expense.isPaid ? totalValue : 0;
+    }
+
+    if (expense.isPaid && paidAmount < totalValue - 0.009) {
+      paidAmount = totalValue;
+    }
+
+    paidAmount = Math.max(0, Math.min(totalValue, Number(paidAmount.toFixed(2))));
+    const remainingAmount = Number(Math.max(0, totalValue - paidAmount).toFixed(2));
+    const isPaid =
+      Boolean(expense.isPaid) || (totalValue > 0 && remainingAmount <= 0.009);
+    const isPartiallyPaid = !isPaid && paidAmount > 0.009;
+    const paidAt =
+      expense.paidAt ||
+      (sortedPayments.length > 0
+        ? sortedPayments[sortedPayments.length - 1].paidAt
+        : null) ||
+      null;
+
+    return {
+      totalValue,
+      paidAmount,
+      remainingAmount,
+      isPaid,
+      isPartiallyPaid,
+      paidAt,
+      payments: sortedPayments,
+    };
+  }
+
+  private toExpenseWithStatus(
+    expense: ExpenseDoc,
+    extras?: Partial<ExpenseWithStatus>,
+  ): ExpenseWithStatus {
+    const summary = this.resolveExpensePaymentSummary(expense);
+    const normalizedDoc: ExpenseDoc = {
+      ...expense,
+      isPaid: summary.isPaid,
+      paidAmount: summary.paidAmount,
+      paidAt: summary.paidAt,
+      payments: summary.payments,
+      receiptUrl: buildProtectedMediaPath(
+        'expense',
+        expense.id,
+        expense.receiptUrl,
+        expense.receiptPublicId,
+      ),
+      receiptPublicId: null,
+    };
+
+    return {
+      ...normalizedDoc,
+      paidAmount: summary.paidAmount,
+      remainingAmount: summary.remainingAmount,
+      isPartiallyPaid: summary.isPartiallyPaid,
+      paidAt: summary.paidAt,
+      payments: summary.payments,
+      status: this.calcularStatus(normalizedDoc),
+      ...extras,
+    };
+  }
+
   private async createCreditCardEntries(params: {
     userId: string;
     accountTypeId: string;
@@ -105,6 +212,7 @@ export class ExpensesService {
     totalValue: number;
     installments: number;
     firstInstallmentDate: string;
+    sourceExpenseId?: string | null;
   }): Promise<ExpenseWithStatus[]> {
     const {
       userId,
@@ -113,6 +221,7 @@ export class ExpensesService {
       totalValue,
       installments,
       firstInstallmentDate,
+      sourceExpenseId,
     } = params;
 
     const installmentValues = this.splitValueInCents(totalValue, installments);
@@ -132,17 +241,18 @@ export class ExpensesService {
         installmentCount: null,
         installmentNumber: null,
         parentExpenseId: null,
+        sourceExpenseId: sourceExpenseId ?? null,
         isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        payments: [],
         isCreditCard: true,
         paymentMethod: null,
         createdAt: now,
         updatedAt: now,
       };
       await this.firebase.setDoc(COLLECTIONS.EXPENSES, singleBill);
-      created.push({
-        ...singleBill,
-        status: this.calcularStatus(singleBill),
-      });
+      created.push(this.toExpenseWithStatus(singleBill));
     } else {
       const parentId = uuidv4();
       for (let i = 0; i < installments; i++) {
@@ -158,17 +268,18 @@ export class ExpensesService {
           installmentCount: installments,
           installmentNumber: i + 1,
           parentExpenseId: i === 0 ? null : parentId,
+          sourceExpenseId: sourceExpenseId ?? null,
           isPaid: false,
+          paidAmount: 0,
+          paidAt: null,
+          payments: [],
           isCreditCard: true,
           paymentMethod: null,
           createdAt: now,
           updatedAt: now,
         };
         await this.firebase.setDoc(COLLECTIONS.EXPENSES, parcela);
-        created.push({
-          ...parcela,
-          status: this.calcularStatus(parcela),
-        });
+        created.push(this.toExpenseWithStatus(parcela));
       }
     }
 
@@ -184,10 +295,10 @@ export class ExpensesService {
     const visibleUserIds =
       authScope.mode === 'family'
         ? authScope.userIds.filter(
-            (uid) =>
-              uid === userId ||
-              (authScope.memberPermissions?.get(uid)?.viewExpenses ?? true),
-          )
+          (uid) =>
+            uid === userId ||
+            (authScope.memberPermissions?.get(uid)?.viewExpenses ?? true),
+        )
         : authScope.userIds;
 
     const [expenses, accountTypes] = await Promise.all([
@@ -213,8 +324,7 @@ export class ExpensesService {
         const normalizedCategoryName = normalizeOfficialCategory(
           accountType?.name,
         );
-        return {
-          ...e,
+        return this.toExpenseWithStatus(e, {
           accountType: {
             id: accountType?.id || e.accountTypeId || 'diversos',
             name: normalizedCategoryName,
@@ -222,11 +332,10 @@ export class ExpensesService {
           isCreditCard:
             Boolean(e.isCreditCard) ||
             isCreditCardCategoryName(accountType?.name),
-          status: this.calcularStatus(e),
           ownerId: e.userId,
           ownerName: owner?.name || 'Usuário',
           isOwn: e.userId === userId,
-        };
+        });
       });
   }
 
@@ -249,7 +358,13 @@ export class ExpensesService {
 
     let result: ExpenseWithStatus | ExpenseWithStatus[];
 
-    if (dto.paymentMethod === 'credito') {
+    if (
+      dto.paymentMethod === 'credito' &&
+      !(
+        dto.paidAmount !== undefined &&
+        dto.paidAmount < Number(dto.value) - 0.009
+      )
+    ) {
       const installments =
         dto.installmentCount && dto.installmentCount >= 1
           ? dto.installmentCount
@@ -276,17 +391,73 @@ export class ExpensesService {
         Boolean(dto.isCreditCard || isCardCategory || dto.isInstallment),
       );
     } else {
-      const isPaid = dto.isPaid ?? Boolean(dto.paymentMethod);
-      const resolvedPaymentMethod = isPaid
-        ? dto.paymentMethod || 'dinheiro'
-        : null;
+      const totalValue = Number(Number(dto.value).toFixed(2));
+      const todayIso = formatDateOnly(getTodayParts());
+      let isPaid = false;
+      let paidAmount = 0;
+      let paidAt: string | null = null;
+      let resolvedPaymentMethod: ExpensePaymentMethod | null = null;
+      let payments: ExpensePaymentPart[] = [];
+
+      if (!dto.isRecurring) {
+        if (dto.paidAmount !== undefined) {
+          const requestedPaid = Number(Number(dto.paidAmount).toFixed(2));
+          if (requestedPaid <= 0) {
+            throw new BadRequestException(
+              'O valor pago deve ser maior que zero.',
+            );
+          }
+          if (requestedPaid > totalValue + 0.009) {
+            throw new BadRequestException(
+              'O valor pago não pode ser maior que o valor total da despesa.',
+            );
+          }
+          const method = (dto.paymentMethod || 'dinheiro') as ExpensePaymentMethod;
+          const actualPaid =
+            requestedPaid >= totalValue - 0.009 ? totalValue : requestedPaid;
+          isPaid = actualPaid >= totalValue - 0.009;
+          if (!isPaid && method === 'credito') {
+            throw new BadRequestException(
+              'Pagamento parcial não pode ser parcelado no cartão de crédito. Use pagamento total ou outra forma.',
+            );
+          }
+          paidAmount = actualPaid;
+          paidAt = dto.paidAt || todayIso;
+          resolvedPaymentMethod = method;
+          payments = [
+            {
+              id: uuidv4(),
+              amount: actualPaid,
+              paidAt,
+              paymentMethod: method,
+              createdAt: new Date().toISOString(),
+            },
+          ];
+        } else if (dto.isPaid ?? Boolean(dto.paymentMethod)) {
+          isPaid = true;
+          paidAmount = totalValue;
+          paidAt = dto.paidAt || todayIso;
+          resolvedPaymentMethod = (dto.paymentMethod ||
+            'dinheiro') as ExpensePaymentMethod;
+          payments = [
+            {
+              id: uuidv4(),
+              amount: totalValue,
+              paidAt,
+              paymentMethod: resolvedPaymentMethod,
+              createdAt: new Date().toISOString(),
+            },
+          ];
+        }
+      }
+
       const now = new Date().toISOString();
 
       const expense: ExpenseDoc = {
         id: uuidv4(),
         name: dto.name.trim(),
         accountTypeId: dto.accountTypeId,
-        value: Number(dto.value),
+        value: totalValue,
         dueDate: dto.dueDate,
         isRecurring: Boolean(dto.isRecurring),
         isInstallment: false,
@@ -295,6 +466,9 @@ export class ExpensesService {
         parentExpenseId: null,
         userId,
         isPaid,
+        paidAmount,
+        paidAt,
+        payments,
         isCreditCard: Boolean(dto.isCreditCard || isCardCategory),
         paymentMethod: resolvedPaymentMethod,
         createdAt: now,
@@ -302,7 +476,7 @@ export class ExpensesService {
       };
 
       await this.firebase.setDoc(COLLECTIONS.EXPENSES, expense);
-      result = { ...expense, status: this.calcularStatus(expense) };
+      result = this.toExpenseWithStatus(expense);
     }
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
@@ -334,16 +508,16 @@ export class ExpensesService {
         installmentNumber: i + 1,
         parentExpenseId: i === 0 ? null : parentId,
         isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        payments: [],
         isCreditCard,
         paymentMethod: null,
         createdAt: now,
         updatedAt: now,
       };
       await this.firebase.setDoc(COLLECTIONS.EXPENSES, parcela);
-      parcelas.push({
-        ...parcela,
-        status: this.calcularStatus(parcela),
-      });
+      parcelas.push(this.toExpenseWithStatus(parcela));
     }
 
     return parcelas;
@@ -361,29 +535,89 @@ export class ExpensesService {
     if (!expense || expense.userId !== userId) {
       throw new NotFoundException('Despesa não encontrada');
     }
-    if (expense.isPaid) {
+
+    const summary = this.resolveExpensePaymentSummary(expense);
+    if (summary.isPaid || summary.remainingAmount <= 0.009) {
       throw new BadRequestException('Esta despesa já foi liquidada');
     }
 
-    const paymentMethod = dto?.paymentMethod || 'dinheiro';
+    const paymentMethod = (dto?.paymentMethod || 'dinheiro') as ExpensePaymentMethod;
+    const paidDate = dto?.paidAt || formatDateOnly(getTodayParts());
     const now = new Date().toISOString();
 
+    let payAmount = summary.remainingAmount;
+    if (dto?.amount !== undefined) {
+      const requestedAmount = Number(Number(dto.amount).toFixed(2));
+      if (Number.isNaN(requestedAmount) || requestedAmount <= 0) {
+        throw new BadRequestException(
+          'O valor do pagamento deve ser maior que zero.',
+        );
+      }
+      if (requestedAmount > summary.remainingAmount + 0.009) {
+        throw new BadRequestException(
+          'O valor informado ultrapassa o saldo restante da despesa.',
+        );
+      }
+      payAmount =
+        requestedAmount >= summary.remainingAmount - 0.009
+          ? summary.remainingAmount
+          : requestedAmount;
+    }
+
+    const isPartial = payAmount < summary.remainingAmount - 0.009;
+
+    if (paymentMethod === 'credito' && isPartial) {
+      throw new BadRequestException(
+        'O parcelamento no cartão de crédito está disponível apenas para pagamento do saldo restante total.',
+      );
+    }
+
+    const newPart: ExpensePaymentPart = {
+      id: uuidv4(),
+      amount: payAmount,
+      paidAt: paidDate,
+      paymentMethod,
+      createdAt: now,
+    };
+
     if (paymentMethod !== 'credito') {
+      const nextPayments = [...summary.payments, newPart];
+      const nextPaidAmount = Number(
+        Math.min(summary.totalValue, summary.paidAmount + payAmount).toFixed(2),
+      );
+      const nextIsPaid = nextPaidAmount >= summary.totalValue - 0.009;
+      const finalPaidAmount = nextIsPaid ? summary.totalValue : nextPaidAmount;
+
       await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
-        isPaid: true,
+        isPaid: nextIsPaid,
+        paidAmount: finalPaidAmount,
+        paidAt: paidDate,
         paymentMethod,
+        payments: nextPayments,
         updatedAt: now,
       });
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
-      return {
+      void this.auditService?.log({
+        actorUserId: userId,
+        action: nextIsPaid ? 'expenses.pay' : 'expenses.pay_partial',
+        resource: 'expenses',
+        resourceId: expense.id,
+        outcome: 'ALLOW',
+      });
+
+      const updatedDoc: ExpenseDoc = {
         ...expense,
-        isPaid: true,
+        isPaid: nextIsPaid,
+        paidAmount: finalPaidAmount,
+        paidAt: paidDate,
         paymentMethod,
+        payments: nextPayments,
         updatedAt: now,
-        status: 'pago',
-        generatedInstallments: [],
       };
+      return this.toExpenseWithStatus(updatedDoc, {
+        generatedInstallments: [],
+      });
     }
 
     const installments = dto?.installments;
@@ -400,9 +634,14 @@ export class ExpensesService {
       );
     }
 
+    const nextPayments = [...summary.payments, newPart];
+
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
       isPaid: true,
+      paidAmount: summary.totalValue,
+      paidAt: paidDate,
       paymentMethod: 'credito',
+      payments: nextPayments,
       updatedAt: now,
     });
 
@@ -411,9 +650,10 @@ export class ExpensesService {
       userId,
       accountTypeId: expense.accountTypeId,
       baseName,
-      totalValue: Number(expense.value),
+      totalValue: summary.remainingAmount,
       installments,
       firstInstallmentDate,
+      sourceExpenseId: expense.id,
     });
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
@@ -426,14 +666,132 @@ export class ExpensesService {
       outcome: 'ALLOW',
     });
 
-    return {
+    const updatedDoc: ExpenseDoc = {
       ...expense,
       isPaid: true,
+      paidAmount: summary.totalValue,
+      paidAt: paidDate,
       paymentMethod: 'credito',
+      payments: nextPayments,
       updatedAt: now,
-      status: 'pago',
-      generatedInstallments,
     };
+    return this.toExpenseWithStatus(updatedDoc, { generatedInstallments });
+  }
+
+  async undoPayment(
+    id: string,
+    userId: string,
+    dto?: UndoPaymentDto,
+  ): Promise<ExpenseWithStatus> {
+    const expense = await this.firebase.findById<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      id,
+    );
+    if (!expense || expense.userId !== userId) {
+      throw new NotFoundException('Despesa não encontrada');
+    }
+
+    const summary = this.resolveExpensePaymentSummary(expense);
+    if (
+      !summary.isPaid &&
+      summary.paidAmount <= 0 &&
+      summary.payments.length === 0
+    ) {
+      throw new BadRequestException(
+        'Esta despesa não possui pagamento registrado para desfazer.',
+      );
+    }
+
+    const linkedCreditItems = await this.firebase.findByField<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      'sourceExpenseId',
+      id,
+    );
+    const ownLinkedCredit = linkedCreditItems.filter((c) => c.userId === userId);
+
+    const removeLinkedOpenCredit = async () => {
+      const alreadyPaidChild = ownLinkedCredit.some((c) => {
+        const childSummary = this.resolveExpensePaymentSummary(c);
+        return childSummary.isPaid || childSummary.paidAmount > 0;
+      });
+      if (alreadyPaidChild) {
+        throw new BadRequestException(
+          'Desfaça primeiro o pagamento das parcelas geradas no cartão de crédito.',
+        );
+      }
+      for (const child of ownLinkedCredit) {
+        await this.firebase.deleteDoc(COLLECTIONS.EXPENSES, child.id);
+      }
+    };
+
+    const now = new Date().toISOString();
+    let nextPayments: ExpensePaymentPart[] = [];
+    let nextPaidAmount = 0;
+    let nextPaidAt: string | null = null;
+    let nextPaymentMethod: string | null = null;
+
+    if (dto?.paymentId) {
+      const targetIdx = summary.payments.findIndex((p) => p.id === dto.paymentId);
+      if (targetIdx === -1) {
+        throw new NotFoundException('Registro de pagamento não encontrado.');
+      }
+      const targetPart = summary.payments[targetIdx];
+      if (targetPart.paymentMethod === 'credito' && ownLinkedCredit.length > 0) {
+        await removeLinkedOpenCredit();
+      }
+      nextPayments = summary.payments.filter((p) => p.id !== dto.paymentId);
+      nextPaidAmount = Number(
+        Math.min(
+          summary.totalValue,
+          nextPayments.reduce((sum, p) => sum + p.amount, 0),
+        ).toFixed(2),
+      );
+      const last =
+        nextPayments.length > 0 ? nextPayments[nextPayments.length - 1] : null;
+      nextPaidAt = last?.paidAt ?? null;
+      nextPaymentMethod = last?.paymentMethod ?? null;
+    } else {
+      if (
+        (expense.paymentMethod === 'credito' ||
+          summary.payments.some((p) => p.paymentMethod === 'credito')) &&
+        ownLinkedCredit.length > 0
+      ) {
+        await removeLinkedOpenCredit();
+      }
+    }
+
+    const nextIsPaid =
+      nextPayments.length > 0 && nextPaidAmount >= summary.totalValue - 0.009;
+
+    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+      isPaid: nextIsPaid,
+      paidAmount: nextPaidAmount,
+      paidAt: nextPaidAt,
+      paymentMethod: nextPaymentMethod,
+      payments: nextPayments,
+      updatedAt: now,
+    });
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.undo_pay',
+      resource: 'expenses',
+      resourceId: id,
+      outcome: 'ALLOW',
+    });
+
+    const updatedDoc: ExpenseDoc = {
+      ...expense,
+      isPaid: nextIsPaid,
+      paidAmount: nextPaidAmount,
+      paidAt: nextPaidAt,
+      paymentMethod: nextPaymentMethod,
+      payments: nextPayments,
+      updatedAt: now,
+    };
+    return this.toExpenseWithStatus(updatedDoc);
   }
 
   async payCreditCardInvoice(
@@ -479,16 +837,33 @@ export class ExpensesService {
     }
 
     const now = new Date().toISOString();
+    const paidDate = dto.paidAt || formatDateOnly(getTodayParts());
     let totalPaid = 0;
     const paidIds: string[] = [];
 
     for (const exp of matching) {
+      const summary = this.resolveExpensePaymentSummary(exp);
+      const remaining = summary.remainingAmount > 0 ? summary.remainingAmount : Number(exp.value);
+      const nextPayments: ExpensePaymentPart[] = [
+        ...summary.payments,
+        {
+          id: uuidv4(),
+          amount: remaining,
+          paidAt: paidDate,
+          paymentMethod: paymentMethod as ExpensePaymentMethod,
+          createdAt: now,
+        },
+      ];
+
       await this.firebase.updateDoc(COLLECTIONS.EXPENSES, exp.id, {
         isPaid: true,
+        paidAmount: Number(exp.value),
+        paidAt: paidDate,
         paymentMethod,
+        payments: nextPayments,
         updatedAt: now,
       });
-      totalPaid += Number(exp.value);
+      totalPaid += remaining;
       paidIds.push(exp.id);
     }
 
@@ -553,13 +928,31 @@ export class ExpensesService {
     }
 
     const now = new Date().toISOString();
+    const paidDate = dto.paidAt || formatDateOnly(getTodayParts());
     let totalPaid = 0;
     const paidIds: string[] = [];
 
     for (const expense of targets) {
+      const summary = this.resolveExpensePaymentSummary(expense);
+      const remaining =
+        summary.remainingAmount > 0 ? summary.remainingAmount : Number(expense.value);
+      const nextPayments: ExpensePaymentPart[] = [
+        ...summary.payments,
+        {
+          id: uuidv4(),
+          amount: remaining,
+          paidAt: paidDate,
+          paymentMethod: paymentMethod as ExpensePaymentMethod,
+          createdAt: now,
+        },
+      ];
+
       await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
         isPaid: true,
+        paidAmount: Number(expense.value),
+        paidAt: paidDate,
         paymentMethod,
+        payments: nextPayments,
         updatedAt: now,
       });
 
@@ -569,13 +962,14 @@ export class ExpensesService {
           userId,
           accountTypeId: expense.accountTypeId,
           baseName,
-          totalValue: Number(expense.value),
+          totalValue: remaining,
           installments: dto.installments!,
           firstInstallmentDate: dto.firstInstallmentDate!,
+          sourceExpenseId: expense.id,
         });
       }
 
-      totalPaid += Number(expense.value);
+      totalPaid += remaining;
       paidIds.push(expense.id);
     }
 
@@ -686,7 +1080,53 @@ export class ExpensesService {
       receiptPublicId: uploaded.publicId,
       updatedAt: now,
     };
-    return { ...updated, status: this.calcularStatus(updated) };
+    return this.toExpenseWithStatus(updated);
+  }
+
+  async getDecryptedReceiptPhoto(
+    id: string,
+    userId: string,
+  ): Promise<DecryptedMediaPayload> {
+    const expense = await this.firebase.findById<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      id,
+    );
+    if (!expense || !expense.receiptUrl) {
+      throw new NotFoundException('Comprovante não encontrado.');
+    }
+
+    if (expense.userId !== userId) {
+      try {
+        const authScope = await this.familyService.resolveAuthorizedScope(
+          userId,
+          'family',
+        );
+        const canView =
+          authScope.userIds.includes(expense.userId) &&
+          (authScope.memberPermissions?.get(expense.userId)?.viewExpenses ??
+            true);
+        if (!canView) {
+          throw new ForbiddenException(
+            'Sem permissão para visualizar este comprovante.',
+          );
+        }
+      } catch (err) {
+        if (err instanceof ForbiddenException) throw err;
+        throw new NotFoundException('Comprovante não encontrado.');
+      }
+    }
+
+    if (!this.cloudinaryService) {
+      throw new BadRequestException(
+        'Serviço de armazenamento de imagens indisponível.',
+      );
+    }
+
+    return this.cloudinaryService.downloadAndDecryptImage({
+      url: expense.receiptUrl,
+      categoryFolder: 'expenses',
+      ownerKey: expense.userId,
+    });
   }
 
   async removeReceiptPhoto(
@@ -729,7 +1169,7 @@ export class ExpensesService {
       receiptPublicId: null,
       updatedAt: now,
     };
-    return { ...updated, status: this.calcularStatus(updated) };
+    return this.toExpenseWithStatus(updated);
   }
 
   async update(
@@ -772,7 +1212,42 @@ export class ExpensesService {
     if (dto.installmentCount !== undefined) {
       updateData.installmentCount = dto.installmentCount;
     }
-    if (dto.isPaid !== undefined) updateData.isPaid = Boolean(dto.isPaid);
+    if (dto.isPaid !== undefined) {
+      const nextPaid = Boolean(dto.isPaid);
+      updateData.isPaid = nextPaid;
+      if (!nextPaid) {
+        updateData.paidAmount = 0;
+        updateData.paidAt = null;
+        updateData.paymentMethod = null;
+        updateData.payments = [];
+      } else if (!expense.isPaid) {
+        const nextVal = Number(updateData.value ?? expense.value);
+        const payDate = dto.paidAt || formatDateOnly(getTodayParts());
+        const method = (dto.paymentMethod ||
+          expense.paymentMethod ||
+          'dinheiro') as ExpensePaymentMethod;
+        const summary = this.resolveExpensePaymentSummary(expense);
+        const remaining = Math.max(0, Number((nextVal - summary.paidAmount).toFixed(2)));
+        updateData.paidAmount = nextVal;
+        updateData.paidAt = payDate;
+        updateData.paymentMethod = method;
+        if (remaining > 0.009) {
+          updateData.payments = [
+            ...summary.payments,
+            {
+              id: uuidv4(),
+              amount: remaining,
+              paidAt: payDate,
+              paymentMethod: method,
+              createdAt: new Date().toISOString(),
+            },
+          ];
+        }
+      }
+    }
+    if (dto.paidAt !== undefined && updateData.paidAt === undefined) {
+      updateData.paidAt = dto.paidAt;
+    }
     if (dto.isCreditCard !== undefined) {
       updateData.isCreditCard = Boolean(dto.isCreditCard);
     }
@@ -780,11 +1255,22 @@ export class ExpensesService {
       updateData.paymentMethod = dto.paymentMethod;
     }
 
+    if (dto.value !== undefined && updateData.isPaid === undefined) {
+      const nextValue = Number(dto.value);
+      const summary = this.resolveExpensePaymentSummary(expense);
+      if (summary.paidAmount > 0 && summary.paidAmount >= nextValue - 0.009) {
+        updateData.isPaid = true;
+        updateData.paidAmount = nextValue;
+      } else if (summary.paidAmount > 0) {
+        updateData.isPaid = false;
+      }
+    }
+
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, updateData);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
     const updated = { ...expense, ...updateData };
-    return { ...updated, status: this.calcularStatus(updated) };
+    return this.toExpenseWithStatus(updated);
   }
 
   async getTotalPaidCurrentMonth(userId: string): Promise<number> {
@@ -797,6 +1283,17 @@ export class ExpensesService {
 
     let total = 0;
     for (const expense of expenses) {
+      if (Array.isArray(expense.payments) && expense.payments.length > 0) {
+        for (const part of expense.payments) {
+          if (part.paymentMethod === 'credito') continue;
+          const pDate = parseDateOnly(part.paidAt || expense.dueDate);
+          if (pDate.year === today.year && pDate.month === today.month) {
+            total += Number(part.amount || 0);
+          }
+        }
+        continue;
+      }
+
       if (expense.paymentMethod === 'credito') continue;
       if (!expense.isPaid && !expense.isRecurring) continue;
 

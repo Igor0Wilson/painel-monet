@@ -4,17 +4,23 @@ import {
   Delete,
   Get,
   NotFoundException,
+  Param,
   Patch,
   Post,
   Request,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import type { UploadedImageFile } from '../common/cloudinary.service';
+import {
+  buildProtectedMediaPath,
+  type UploadedImageFile,
+} from '../common/cloudinary.service';
 import { maskCpf, maskEmail, maskPhone } from '../common/cpf.utils';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
@@ -40,8 +46,33 @@ export class UsersController {
       maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
       maskedPhone: maskPhone(user.phone),
       hasCpf: Boolean(user.cpf),
-      avatarUrl: user.avatarUrl || null,
+      avatarUrl: buildProtectedMediaPath(
+        'avatar',
+        user.id,
+        user.avatarUrl,
+        user.avatarPublicId,
+      ),
     };
+  }
+
+  @Get('avatar/:targetUserId')
+  async getAvatar(
+    @Param('targetUserId') targetUserId: string,
+    @Request() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ) {
+    const media = await this.usersService.getDecryptedAvatar(
+      req.user.userId,
+      targetUserId,
+    );
+    res.setHeader('Content-Type', media.mime);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="avatar-${targetUserId.replace(/[^a-zA-Z0-9_-]/g, '')}.${media.ext}"`,
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(media.buffer);
   }
 
   @Get('me/profile')
@@ -62,7 +93,12 @@ export class UsersController {
       maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
       maskedPhone: maskPhone(user.phone),
       hasCpf: Boolean(user.cpf),
-      avatarUrl: user.avatarUrl || null,
+      avatarUrl: buildProtectedMediaPath(
+        'avatar',
+        user.id,
+        user.avatarUrl,
+        user.avatarPublicId,
+      ),
     };
   }
 

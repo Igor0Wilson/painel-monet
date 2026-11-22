@@ -13,4 +13,10 @@ export class PayCreditCardInvoiceDto {
     message: 'Forma de pagamento da fatura inválida. Use: pix, debito ou dinheiro.',
   })
   paymentMethod?: CashPaymentMethod;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Informe a data do pagamento no formato YYYY-MM-DD.',
+  })
+  paidAt?: string;
 }

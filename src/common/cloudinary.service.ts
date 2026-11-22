@@ -1,11 +1,34 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
-import { redactSensitiveText } from './data-crypto.utils';
+import {
+  type DecryptedMediaPayload,
+  decryptMediaBuffer,
+  encryptMediaBuffer,
+  isEncryptedMediaBuffer,
+  redactSensitiveText,
+} from './data-crypto.utils';
+
+export function buildProtectedMediaPath(
+  kind: 'avatar' | 'expense',
+  entityId: string,
+  rawUrl?: string | null,
+  rawPublicId?: string | null,
+): string | null {
+  if (!rawUrl || !rawUrl.trim()) return null;
+  const ver = createHash('sha256')
+    .update(rawPublicId || rawUrl)
+    .digest('hex')
+    .slice(0, 10);
+  return kind === 'avatar'
+    ? `/users/avatar/${encodeURIComponent(entityId)}?v=${ver}`
+    : `/expenses/${encodeURIComponent(entityId)}/photo?v=${ver}`;
+}
 
 export interface UploadedImageFile {
   fieldname: string;
@@ -28,7 +51,7 @@ interface DetectedImageType {
   mime: string;
 }
 
-function detectImageTypeByMagicBytes(buf: Buffer): DetectedImageType | null {
+export function detectImageTypeByMagicBytes(buf: Buffer): DetectedImageType | null {
   if (!buf || buf.length < 12) return null;
 
   // JPEG: FF D8 FF
@@ -142,8 +165,14 @@ export class CloudinaryService {
 
     const safeOwner = ownerKey.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'user';
     const folder = `painel-monet/${envPrefix}/${categoryFolder}/${safeOwner}`;
-    const publicId = `${safeOwner}-${randomUUID().slice(0, 12)}`;
+    const publicId = `${safeOwner}-${randomUUID().slice(0, 12)}.enc`;
     const timestamp = String(Math.floor(Date.now() / 1000));
+
+    const encryptedBuffer = encryptMediaBuffer(
+      file.buffer,
+      { categoryFolder, ownerId: ownerKey },
+      detected,
+    );
 
     const signPayload: Record<string, string> = {
       folder,
@@ -156,8 +185,10 @@ export class CloudinaryService {
     const form = new FormData();
     form.append(
       'file',
-      new Blob([new Uint8Array(file.buffer)], { type: detected.mime }),
-      `${publicId}.${detected.ext}`,
+      new Blob([new Uint8Array(encryptedBuffer)], {
+        type: 'application/octet-stream',
+      }),
+      publicId,
     );
     form.append('api_key', creds.apiKey);
     form.append('timestamp', timestamp);
@@ -167,7 +198,7 @@ export class CloudinaryService {
     form.append('signature', signature);
 
     const response = await fetch(
-      `https://api.cloudinary.com/v1_1/${encodeURIComponent(creds.cloudName)}/image/upload`,
+      `https://api.cloudinary.com/v1_1/${encodeURIComponent(creds.cloudName)}/raw/upload`,
       {
         method: 'POST',
         body: form,
@@ -177,7 +208,7 @@ export class CloudinaryService {
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
       this.logger.error(
-        `Falha ao enviar imagem ao Cloudinary (${response.status}): ${redactSensitiveText(errText).slice(0, 200)}`,
+        `Falha ao enviar imagem criptografada ao Cloudinary (${response.status}): ${redactSensitiveText(errText).slice(0, 200)}`,
       );
       throw new InternalServerErrorException(
         'Não foi possível armazenar a imagem no momento.',
@@ -197,6 +228,56 @@ export class CloudinaryService {
     return {
       url: data.secure_url,
       publicId: data.public_id,
+    };
+  }
+
+  async downloadAndDecryptImage(params: {
+    url: string;
+    categoryFolder: 'avatars' | 'expenses';
+    ownerKey: string;
+  }): Promise<DecryptedMediaPayload> {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(params.url);
+    } catch {
+      throw new BadRequestException('URL de imagem inválida.');
+    }
+
+    if (
+      parsedUrl.protocol !== 'https:' ||
+      parsedUrl.hostname !== 'res.cloudinary.com'
+    ) {
+      throw new ForbiddenException('Origem de armazenamento de imagem não permitida.');
+    }
+
+    const response = await fetch(parsedUrl.toString());
+    if (!response.ok) {
+      throw new InternalServerErrorException(
+        'Não foi possível recuperar a imagem protegida.',
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const rawBytes = Buffer.from(arrayBuffer);
+
+    if (isEncryptedMediaBuffer(rawBytes)) {
+      return decryptMediaBuffer(rawBytes, {
+        categoryFolder: params.categoryFolder,
+        ownerId: params.ownerKey,
+      });
+    }
+
+    const legacyDetected = detectImageTypeByMagicBytes(rawBytes);
+    if (!legacyDetected) {
+      throw new InternalServerErrorException(
+        'Arquivo armazenado inválido ou corrompido.',
+      );
+    }
+
+    return {
+      buffer: rawBytes,
+      mime: legacyDetected.mime,
+      ext: legacyDetected.ext,
     };
   }
 
@@ -226,9 +307,11 @@ export class CloudinaryService {
       signature,
     });
 
+    const resourceType = trimmed.endsWith('.enc') ? 'raw' : 'image';
+
     try {
       const response = await fetch(
-        `https://api.cloudinary.com/v1_1/${encodeURIComponent(creds.cloudName)}/image/destroy`,
+        `https://api.cloudinary.com/v1_1/${encodeURIComponent(creds.cloudName)}/${resourceType}/destroy`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

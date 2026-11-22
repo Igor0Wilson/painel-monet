@@ -1,11 +1,16 @@
 import {
   BadRequestException,
+  ForbiddenException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import {
   CloudinaryService,
   type UploadedImageFile,
 } from '../../src/common/cloudinary.service';
+import {
+  decryptMediaBuffer,
+  isEncryptedMediaBuffer,
+} from '../../src/common/data-crypto.utils';
 import { ExpensesService } from '../../src/expenses/expenses.service';
 import { FamilyService } from '../../src/family/family.service';
 import { FirebaseService } from '../../src/firebase/firebase.service';
@@ -89,40 +94,82 @@ describe('CloudinaryService & Media Lifecycle Cleanup', () => {
       );
     });
 
-    it('uploads image with signed payload into dev folder and ignores unsafe delete publicIds', async () => {
+    it('encrypts uploaded images with AES-256-GCM before storing in raw folder and supports decrypt/destroy', async () => {
+      const plainPng = makePngBuffer(96);
       const fetchMock = jest.fn().mockResolvedValue({
         ok: true,
         json: async () => ({
-          secure_url: 'https://res.cloudinary.com/demo-cloud/image/upload/v1/painel-monet/dev/avatars/u-1/photo.png',
-          public_id: 'painel-monet/dev/avatars/u-1/photo',
+          secure_url:
+            'https://res.cloudinary.com/demo-cloud/raw/upload/v1/painel-monet/dev/avatars/u-1/photo.enc',
+          public_id: 'painel-monet/dev/avatars/u-1/photo.enc',
         }),
       });
       global.fetch = fetchMock as unknown as typeof fetch;
 
       const svc = new CloudinaryService();
       const uploaded = await svc.uploadImage(
-        makeImageFile(makePngBuffer()),
+        makeImageFile(plainPng),
         'avatars',
         'u-1',
       );
 
-      expect(uploaded.publicId).toBe('painel-monet/dev/avatars/u-1/photo');
+      expect(uploaded.publicId).toBe('painel-monet/dev/avatars/u-1/photo.enc');
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe('https://api.cloudinary.com/v1_1/demo-cloud/image/upload');
+      expect(url).toBe('https://api.cloudinary.com/v1_1/demo-cloud/raw/upload');
       expect(init.method).toBe('POST');
+
+      const sentForm = init.body as FormData;
+      const sentBlob = sentForm.get('file') as Blob;
+      const sentBuffer = Buffer.from(await sentBlob.arrayBuffer());
+      expect(isEncryptedMediaBuffer(sentBuffer)).toBe(true);
+      expect(sentBuffer.equals(plainPng)).toBe(false);
+
+      const decryptedDirect = decryptMediaBuffer(sentBuffer, {
+        categoryFolder: 'avatars',
+        ownerId: 'u-1',
+      });
+      expect(decryptedDirect.buffer.equals(plainPng)).toBe(true);
+      expect(decryptedDirect.mime).toBe('image/png');
+
+      // Downloading via service decrypts ciphertext transparently and validates SSRF host
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () =>
+          sentBuffer.buffer.slice(
+            sentBuffer.byteOffset,
+            sentBuffer.byteOffset + sentBuffer.byteLength,
+          ),
+      });
+      const downloaded = await svc.downloadAndDecryptImage({
+        url: uploaded.url,
+        categoryFolder: 'avatars',
+        ownerKey: 'u-1',
+      });
+      expect(downloaded.buffer.equals(plainPng)).toBe(true);
+      expect(downloaded.mime).toBe('image/png');
+
+      await expect(
+        svc.downloadAndDecryptImage({
+          url: 'https://evil.example.com/payload.enc',
+          categoryFolder: 'avatars',
+          ownerKey: 'u-1',
+        }),
+      ).rejects.toThrow(ForbiddenException);
 
       // Traversal / prefix outside painel-monet/ must never call Cloudinary destroy
       await svc.deleteImage('../../other/folder');
       await svc.deleteImage('other-app/photo');
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-
-      // Valid painel-monet publicId triggers signed destroy
-      await svc.deleteImage('painel-monet/dev/avatars/u-1/old-photo');
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      const [destroyUrl, destroyInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      expect(destroyUrl).toBe('https://api.cloudinary.com/v1_1/demo-cloud/image/destroy');
-      expect(String(destroyInit.body)).toContain('public_id=painel-monet%2Fdev%2Favatars%2Fu-1%2Fold-photo');
+
+      // Encrypted .enc publicId destroys via /raw/destroy; legacy via /image/destroy
+      await svc.deleteImage('painel-monet/dev/avatars/u-1/old-photo.enc');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const [destroyUrl, destroyInit] = fetchMock.mock.calls[2] as [string, RequestInit];
+      expect(destroyUrl).toBe('https://api.cloudinary.com/v1_1/demo-cloud/raw/destroy');
+      expect(String(destroyInit.body)).toContain(
+        'public_id=painel-monet%2Fdev%2Favatars%2Fu-1%2Fold-photo.enc',
+      );
     });
 
     it('throws InternalServerErrorException when Cloudinary env vars are missing', async () => {
@@ -216,7 +263,7 @@ describe('CloudinaryService & Media Lifecycle Cleanup', () => {
         'u-media',
         makeImageFile(makePngBuffer()),
       );
-      expect(replaced.avatarUrl).toBe('https://res.cloudinary.com/demo/new-avatar.png');
+      expect(replaced.avatarUrl).toMatch(/^\/users\/avatar\/u-media\?v=[a-f0-9]+$/);
       expect(cloudinaryMock.deleteImage).toHaveBeenCalledWith(
         'painel-monet/dev/avatars/u-media/old-avatar',
       );
@@ -273,7 +320,7 @@ describe('CloudinaryService & Media Lifecycle Cleanup', () => {
         'u-media',
         makeImageFile(makeJpegBuffer(), 'image/jpeg', 'cupom.jpg'),
       );
-      expect(updated.receiptUrl).toBe('https://res.cloudinary.com/demo/exp-new.png');
+      expect(updated.receiptUrl).toMatch(/^\/expenses\/exp-1\/photo\?v=[a-f0-9]+$/);
       expect(cloudinaryMock.deleteImage).toHaveBeenCalledWith(
         'painel-monet/dev/expenses/u-media/exp-old',
       );
@@ -313,6 +360,33 @@ describe('CloudinaryService & Media Lifecycle Cleanup', () => {
       expect(cloudinaryMock.deleteImage).toHaveBeenCalledWith(
         'painel-monet/dev/expenses/u-media/luz',
       );
+    });
+
+    it('blocks unauthorized users (IDOR) from downloading/decrypting another user avatar or receipt', async () => {
+      await firebase.setDoc(COLLECTIONS.EXPENSES, {
+        id: 'exp-secret-1',
+        userId: 'u-media',
+        name: 'Recibo Privado',
+        accountTypeId: 'cat-1',
+        value: 99,
+        dueDate: '2026-11-20',
+        isRecurring: false,
+        isInstallment: false,
+        isPaid: true,
+        isCreditCard: false,
+        receiptUrl: 'https://res.cloudinary.com/demo-cloud/raw/upload/v1/painel-monet/dev/expenses/u-media/secret.enc',
+        receiptPublicId: 'painel-monet/dev/expenses/u-media/secret.enc',
+        createdAt: '',
+        updatedAt: '',
+      });
+
+      await expect(
+        usersService.getDecryptedAvatar('attacker-id', 'u-media'),
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        expensesService.getDecryptedReceiptPhoto('exp-secret-1', 'attacker-id'),
+      ).rejects.toThrow();
     });
   });
 });

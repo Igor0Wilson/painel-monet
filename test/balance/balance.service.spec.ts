@@ -389,4 +389,77 @@ describe('BalanceService (Firestore)', () => {
     const balAfterDelete = await service.getBalance('u-1', 'individual');
     expect(balAfterDelete.investments).toBe(5000);
   });
+
+  it('deducts partial payments immediately from balance/VA and plots chart by paidAt date', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-1',
+      name: 'Igor',
+      email: 'igor@test.com',
+      cpf: null,
+      phone: null,
+      emergencyFund: 0,
+      externalEmergencyFund: 0,
+      investments: 0,
+      externalInvestments: 0,
+      foodAllowance: 500,
+      foodAllowanceDate: '2026-11-01',
+      foodAllowanceRecurring: false,
+      createdAt: '',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.ACCOUNT_TYPES, {
+      id: 'cat-food',
+      name: 'Alimentação',
+      userId: 'u-1',
+      createdAt: '',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.INCOME, {
+      id: 'inc-1',
+      userId: 'u-1',
+      name: 'Salário',
+      value: 2000,
+      incomeDate: '2026-11-05',
+      isRecurring: false,
+      createdAt: '',
+      updatedAt: '',
+    });
+    await firebase.setDoc(COLLECTIONS.EXPENSES, {
+      id: 'exp-part',
+      userId: 'u-1',
+      accountTypeId: 'cat-food',
+      name: 'Compra Mês',
+      value: 600,
+      dueDate: '2026-11-28',
+      isRecurring: false,
+      isInstallment: false,
+      installmentCount: null,
+      installmentNumber: null,
+      parentExpenseId: null,
+      isPaid: false,
+      paidAmount: 350,
+      paidAt: '2026-11-12',
+      payments: [
+        { id: 'p-cash', amount: 250, paidAt: '2026-11-10', paymentMethod: 'pix' },
+        { id: 'p-va', amount: 100, paidAt: '2026-11-12', paymentMethod: 'va' },
+      ],
+      isCreditCard: false,
+      paymentMethod: 'va',
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    const bal = await service.getBalance('u-1', 'individual');
+    expect(bal.totalExpenses).toBe(350);
+    expect(bal.balance).toBe(1750);
+    expect(bal.foodAllowanceUsed).toBe(100);
+    expect(bal.foodAllowance).toBe(400);
+
+    const charts = await service.getChartData('u-1', '2026-11', 'individual');
+    expect(charts.monthSummary.totalExpenses).toBe(350);
+    const day10 = charts.monthlyHistory.find((p) => p.day === 10);
+    const day12 = charts.monthlyHistory.find((p) => p.day === 12);
+    expect(day10?.expenses).toBe(250);
+    expect(day12?.expenses).toBe(350);
+  });
 });

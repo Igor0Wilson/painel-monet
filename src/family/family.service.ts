@@ -15,6 +15,7 @@ import {
 } from '../auth/email-template';
 import { EmailSenderService } from '../auth/email-sender.service';
 import { AuditService } from '../common/audit.service';
+import { buildProtectedMediaPath } from '../common/cloudinary.service';
 import { isValidCpf, maskCpf, maskPhone, normalizeCpf } from '../common/cpf.utils';
 import { redactSensitiveText } from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
@@ -308,7 +309,12 @@ export class FamilyService {
             maskedCpf: maskCpf(user!.cpf),
             maskedPhone: maskPhone(user!.phone),
             phone: allowFullContact ? user!.phone : null,
-            avatarUrl: user!.avatarUrl || null,
+            avatarUrl: buildProtectedMediaPath(
+              'avatar',
+              user!.id,
+              user!.avatarUrl,
+              user!.avatarPublicId,
+            ),
             role: m.role,
             isSelf,
             permissionsSharedWithMe: perms,

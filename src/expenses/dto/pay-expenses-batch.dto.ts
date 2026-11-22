@@ -34,4 +34,11 @@ export class PayExpensesBatchDto {
     message: 'Informe a data no formato YYYY-MM-DD.',
   })
   firstInstallmentDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Informe a data do pagamento no formato YYYY-MM-DD.',
+  })
+  paidAt?: string;
 }

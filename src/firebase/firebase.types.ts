@@ -34,6 +34,22 @@ export interface AccountTypeDoc {
   updatedAt: string;
 }
 
+export type ExpensePaymentMethod =
+  | 'dinheiro'
+  | 'pix'
+  | 'debito'
+  | 'credito'
+  | 'va'
+  | 'vr';
+
+export interface ExpensePaymentPart {
+  id: string;
+  amount: number;
+  paidAt: string;
+  paymentMethod: ExpensePaymentMethod;
+  createdAt?: string;
+}
+
 export interface ExpenseDoc {
   id: string;
   userId: string;
@@ -46,7 +62,11 @@ export interface ExpenseDoc {
   installmentCount: number | null;
   installmentNumber: number | null;
   parentExpenseId: string | null;
+  sourceExpenseId?: string | null;
   isPaid: boolean;
+  paidAmount?: number;
+  paidAt?: string | null;
+  payments?: ExpensePaymentPart[];
   isCreditCard: boolean;
   paymentMethod: string | null;
   receiptUrl?: string | null;

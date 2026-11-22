@@ -7,6 +7,7 @@ import {
 import { randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
 import { AuditService } from '../common/audit.service';
+import { buildProtectedMediaPath } from '../common/cloudinary.service';
 import { maskPhone } from '../common/cpf.utils';
 import {
   FamilyService,
@@ -65,12 +66,39 @@ export class BalanceService {
     let foodAllowanceUsed = 0;
 
     for (const curr of userExpenses) {
-      if (!curr.isPaid || curr.paymentMethod === 'credito') continue;
-      const val = Number(curr.value);
-      if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
-        foodAllowanceUsed += val;
-      } else {
-        cashExpenses += val;
+      if (Array.isArray(curr.payments) && curr.payments.length > 0) {
+        for (const part of curr.payments) {
+          if (part.paymentMethod === 'credito') continue;
+          const partVal = Number(part.amount || 0);
+          if (part.paymentMethod === 'va' || part.paymentMethod === 'vr') {
+            foodAllowanceUsed += partVal;
+          } else {
+            cashExpenses += partVal;
+          }
+        }
+        continue;
+      }
+
+      if (curr.isPaid) {
+        if (curr.paymentMethod === 'credito') continue;
+        const val = Number(curr.value);
+        if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
+          foodAllowanceUsed += val;
+        } else {
+          cashExpenses += val;
+        }
+      } else if (
+        curr.paidAmount !== undefined &&
+        curr.paidAmount !== null &&
+        Number(curr.paidAmount) > 0 &&
+        curr.paymentMethod !== 'credito'
+      ) {
+        const partialVal = Math.min(Number(curr.value), Number(curr.paidAmount));
+        if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
+          foodAllowanceUsed += partialVal;
+        } else {
+          cashExpenses += partialVal;
+        }
       }
     }
 
@@ -304,7 +332,12 @@ export class BalanceService {
           maskedCpf: info?.maskedCpf || '***.***.***-**',
           maskedPhone: maskPhone(u.phone),
           phone: allowFullContact ? u.phone || null : null,
-          avatarUrl: u.avatarUrl || null,
+          avatarUrl: buildProtectedMediaPath(
+            'avatar',
+            u.id,
+            u.avatarUrl,
+            u.avatarPublicId,
+          ),
           isSelf: u.id === userId,
           permissions,
           ...metrics,
@@ -964,14 +997,28 @@ export class BalanceService {
       const isRecurringInMonth =
         Boolean(e.isRecurring) && targetMonthIdx >= expMonthIdx;
 
-      if (!isSameMonth && !isRecurringInMonth) return;
+      if (isSameMonth || isRecurringInMonth) {
+        const val = Number(e.value);
+        const rawCatName = typesById.get(e.accountTypeId)?.name;
+        const catName = normalizeOfficialCategory(rawCatName);
+        categoryMap.set(catName, (categoryMap.get(catName) || 0) + val);
+      }
 
-      const val = Number(e.value);
-      const rawCatName = typesById.get(e.accountTypeId)?.name;
-      const catName = normalizeOfficialCategory(rawCatName);
-      categoryMap.set(catName, (categoryMap.get(catName) || 0) + val);
-
-      if (e.isPaid && isSameMonth) {
+      if (Array.isArray(e.payments) && e.payments.length > 0) {
+        for (const part of e.payments) {
+          if (part.paymentMethod === 'credito') continue;
+          const pDate = parseDateOnly(part.paidAt || e.dueDate);
+          if (pDate.year === year && pDate.month === monthNum) {
+            const pVal = Number(part.amount || 0);
+            monthTotalExpenses += pVal;
+            dailyExpenseMap.set(
+              pDate.day,
+              (dailyExpenseMap.get(pDate.day) || 0) + pVal,
+            );
+          }
+        }
+      } else if (e.isPaid && isSameMonth && e.paymentMethod !== 'credito') {
+        const val = Number(e.value);
         monthTotalExpenses += val;
         dailyExpenseMap.set(d.day, (dailyExpenseMap.get(d.day) || 0) + val);
       }

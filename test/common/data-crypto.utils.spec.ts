@@ -3,9 +3,12 @@ import {
   computeBlindIndex,
   decryptDocumentFromStorage,
   decryptFieldValue,
+  decryptMediaBuffer,
   encryptDocumentForStorage,
   encryptFieldValue,
+  encryptMediaBuffer,
   extractCiphertextKeyVersion,
+  isEncryptedMediaBuffer,
   isEncryptedValue,
   parseAes256Key,
   redactSensitiveText,
@@ -188,5 +191,52 @@ describe('data-crypto.utils (AES-256-GCM + AAD + Key Rotation)', () => {
     expect(redacted).not.toContain('eyJhbGci');
     expect(redacted).not.toContain('123.456.789-00');
     expect(redacted).not.toContain('joao@teste.com');
+  });
+
+  it('encrypts expense partial payment history (JSON) and binary media buffers with AAD checks', () => {
+    const rawExpense = {
+      id: 'exp-enc-1',
+      userId: 'user-1',
+      accountTypeId: 'cat-1',
+      name: 'Aluguel Residencial',
+      value: 2000,
+      paidAmount: 750,
+      payments: [
+        { id: 'p-1', amount: 750, paidAt: '2026-11-10', paymentMethod: 'pix' },
+      ],
+    };
+
+    const encryptedDoc = encryptDocumentForStorage(COLLECTIONS.EXPENSES, rawExpense);
+    expect(isEncryptedValue(encryptedDoc.paidAmount)).toBe(true);
+    expect(isEncryptedValue(encryptedDoc.payments)).toBe(true);
+
+    const decryptedDoc = decryptDocumentFromStorage(COLLECTIONS.EXPENSES, encryptedDoc);
+    expect(decryptedDoc?.paidAmount).toBe(750);
+    expect(decryptedDoc?.payments).toEqual(rawExpense.payments);
+
+    const samplePng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const encMedia = encryptMediaBuffer(
+      samplePng,
+      { categoryFolder: 'expenses', ownerId: 'user-1' },
+      { mime: 'image/png', ext: 'png' },
+    );
+
+    expect(isEncryptedMediaBuffer(encMedia)).toBe(true);
+    expect(encMedia.includes(samplePng)).toBe(false);
+
+    const decMedia = decryptMediaBuffer(encMedia, {
+      categoryFolder: 'expenses',
+      ownerId: 'user-1',
+    });
+    expect(decMedia.buffer.equals(samplePng)).toBe(true);
+    expect(decMedia.mime).toBe('image/png');
+
+    // Wrong owner AAD must fail authentication
+    expect(() =>
+      decryptMediaBuffer(encMedia, {
+        categoryFolder: 'expenses',
+        ownerId: 'attacker-user',
+      }),
+    ).toThrow(/autenticação/i);
   });
 });

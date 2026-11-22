@@ -11,9 +11,11 @@ import { randomBytes, randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
 import { AuditService } from '../common/audit.service';
 import {
+  buildProtectedMediaPath,
   CloudinaryService,
   type UploadedImageFile,
 } from '../common/cloudinary.service';
+import type { DecryptedMediaPayload } from '../common/data-crypto.utils';
 import {
   isValidCpf,
   maskCpf,
@@ -58,7 +60,7 @@ export class UsersService {
     private readonly firebase: FirebaseService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly cloudinaryService?: CloudinaryService,
-  ) {}
+  ) { }
 
   async createFromFirebase(params: RegisterFirebaseUserParams): Promise<UserDoc> {
     const normalizedEmail = params.email.trim().toLowerCase();
@@ -206,7 +208,12 @@ export class UsersService {
       maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
       maskedPhone: maskPhone(user.phone),
       hasCpf: Boolean(user.cpf),
-      avatarUrl: user.avatarUrl || null,
+      avatarUrl: buildProtectedMediaPath(
+        'avatar',
+        user.id,
+        user.avatarUrl,
+        user.avatarPublicId,
+      ),
     };
   }
 
@@ -253,8 +260,70 @@ export class UsersService {
       maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
       maskedPhone: maskPhone(user.phone),
       hasCpf: Boolean(user.cpf),
-      avatarUrl: uploaded.url,
+      avatarUrl: buildProtectedMediaPath(
+        'avatar',
+        user.id,
+        uploaded.url,
+        uploaded.publicId,
+      ),
     };
+  }
+
+  async getDecryptedAvatar(
+    viewerUserId: string,
+    targetUserId: string,
+  ): Promise<DecryptedMediaPayload> {
+    if (!targetUserId) {
+      throw new NotFoundException('Foto de perfil não encontrada.');
+    }
+
+    const targetUser = await this.findById(targetUserId);
+    if (!targetUser || !targetUser.avatarUrl) {
+      throw new NotFoundException('Foto de perfil não encontrada.');
+    }
+
+    if (targetUserId !== viewerUserId) {
+      const [viewerUser, viewerMember, targetMember] = await Promise.all([
+        this.findById(viewerUserId),
+        this.firebase.findById<FamilyMemberDoc>(
+          COLLECTIONS.FAMILY_MEMBERS,
+          viewerUserId,
+        ),
+        this.firebase.findById<FamilyMemberDoc>(
+          COLLECTIONS.FAMILY_MEMBERS,
+          targetUserId,
+        ),
+      ]);
+
+      const authorizedSameFamily = Boolean(
+        viewerUser &&
+        viewerUser.cpf &&
+        targetUser.cpf &&
+        viewerMember &&
+        targetMember &&
+        viewerMember.userCpf === viewerUser.cpf &&
+        targetMember.userCpf === targetUser.cpf &&
+        viewerMember.familyGroupId === targetMember.familyGroupId,
+      );
+
+      if (!authorizedSameFamily) {
+        throw new ForbiddenException(
+          'Sem permissão para visualizar a foto deste usuário.',
+        );
+      }
+    }
+
+    if (!this.cloudinaryService) {
+      throw new BadRequestException(
+        'Serviço de armazenamento de imagens indisponível.',
+      );
+    }
+
+    return this.cloudinaryService.downloadAndDecryptImage({
+      url: targetUser.avatarUrl,
+      categoryFolder: 'avatars',
+      ownerKey: targetUser.id,
+    });
   }
 
   async removeAvatar(userId: string) {
@@ -535,13 +604,40 @@ export class UsersService {
         return null;
       }
       const val = Number(exp.value || 0);
-      if (exp.isPaid) {
-        totalPaidExpenses += val;
-        if (exp.paymentMethod === 'va' || exp.paymentMethod === 'vr') {
-          totalFoodVoucherExpenses += val;
-        } else {
-          totalCashPaidExpenses += val;
+      const hasParts = Array.isArray(exp.payments) && exp.payments.length > 0;
+      const paidAmt = hasParts
+        ? Math.min(
+          val,
+          Number(
+            exp.payments!
+              .reduce((sum, p) => sum + Number(p.amount || 0), 0)
+              .toFixed(2),
+          ),
+        )
+        : exp.isPaid
+          ? val
+          : Math.min(val, Number(exp.paidAmount || 0));
+      const remainingAmt = Math.max(0, Number((val - paidAmt).toFixed(2)));
+
+      if (hasParts) {
+        for (const part of exp.payments!) {
+          const partVal = Number(part.amount || 0);
+          totalPaidExpenses += partVal;
+          if (part.paymentMethod === 'va' || part.paymentMethod === 'vr') {
+            totalFoodVoucherExpenses += partVal;
+          } else if (part.paymentMethod !== 'credito') {
+            totalCashPaidExpenses += partVal;
+          }
         }
+        totalPendingExpenses += remainingAmt;
+      } else if (exp.isPaid || paidAmt > 0) {
+        totalPaidExpenses += paidAmt;
+        if (exp.paymentMethod === 'va' || exp.paymentMethod === 'vr') {
+          totalFoodVoucherExpenses += paidAmt;
+        } else if (exp.paymentMethod !== 'credito') {
+          totalCashPaidExpenses += paidAmt;
+        }
+        totalPendingExpenses += remainingAmt;
       } else {
         totalPendingExpenses += val;
       }
@@ -558,6 +654,10 @@ export class UsersService {
         name: exp.name,
         category: catName,
         value: val,
+        paidAmount: paidAmt,
+        remainingAmount: remainingAmt,
+        paidAt: exp.paidAt || null,
+        payments: exp.payments || [],
         dueDate: exp.dueDate,
         isPaid: Boolean(exp.isPaid),
         paymentMethod: exp.paymentMethod || null,

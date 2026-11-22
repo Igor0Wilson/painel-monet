@@ -43,7 +43,7 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
 
 const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['value'],
-  [COLLECTIONS.EXPENSES]: ['value'],
+  [COLLECTIONS.EXPENSES]: ['value', 'paidAmount'],
   [COLLECTIONS.INVESTMENTS]: ['amount'],
   [COLLECTIONS.USERS]: [
     'emergencyFund',
@@ -53,6 +53,23 @@ const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
     'foodAllowance',
   ],
 };
+
+const ENCRYPTED_JSON_FIELDS: Record<string, string[]> = {
+  [COLLECTIONS.EXPENSES]: ['payments'],
+};
+
+const MEDIA_BINARY_MAGIC = Buffer.from('PMENC2\0', 'ascii');
+
+export interface MediaEncryptionContext {
+  categoryFolder: 'avatars' | 'expenses';
+  ownerId: string;
+}
+
+export interface DecryptedMediaPayload {
+  buffer: Buffer;
+  mime: string;
+  ext: 'jpg' | 'png' | 'webp' | 'gif';
+}
 
 function isKnownPlaceholderSecret(raw: string): boolean {
   const normalized = raw.trim().toLowerCase();
@@ -442,13 +459,19 @@ export function isEncryptedCollectionField(
 ): boolean {
   const strFields = ENCRYPTED_STRING_FIELDS[collectionName] || [];
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
-  return strFields.includes(fieldName) || numFields.includes(fieldName);
+  const jsonFields = ENCRYPTED_JSON_FIELDS[collectionName] || [];
+  return (
+    strFields.includes(fieldName) ||
+    numFields.includes(fieldName) ||
+    jsonFields.includes(fieldName)
+  );
 }
 
 export function hasEncryptedCollectionFields(collectionName: string): boolean {
   return (
     (ENCRYPTED_STRING_FIELDS[collectionName]?.length || 0) > 0 ||
-    (ENCRYPTED_NUMBER_FIELDS[collectionName]?.length || 0) > 0
+    (ENCRYPTED_NUMBER_FIELDS[collectionName]?.length || 0) > 0 ||
+    (ENCRYPTED_JSON_FIELDS[collectionName]?.length || 0) > 0
   );
 }
 
@@ -456,6 +479,7 @@ export function getEncryptedFieldNames(collectionName: string): string[] {
   return [
     ...(ENCRYPTED_STRING_FIELDS[collectionName] || []),
     ...(ENCRYPTED_NUMBER_FIELDS[collectionName] || []),
+    ...(ENCRYPTED_JSON_FIELDS[collectionName] || []),
   ];
 }
 
@@ -466,6 +490,7 @@ export function hasUnencryptedSensitiveFields(
   if (!doc || typeof doc !== 'object') return false;
   const strFields = ENCRYPTED_STRING_FIELDS[collectionName] || [];
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
+  const jsonFields = ENCRYPTED_JSON_FIELDS[collectionName] || [];
 
   for (const field of strFields) {
     const val = doc[field];
@@ -479,6 +504,12 @@ export function hasUnencryptedSensitiveFields(
     }
   }
   for (const field of numFields) {
+    const val = doc[field];
+    if (val !== undefined && val !== null && !isEncryptedValue(val)) {
+      return true;
+    }
+  }
+  for (const field of jsonFields) {
     const val = doc[field];
     if (val !== undefined && val !== null && !isEncryptedValue(val)) {
       return true;
@@ -546,7 +577,10 @@ export function encryptDocumentForStorage<T extends object>(
   if (!doc || typeof doc !== 'object') return doc;
   const strFields = ENCRYPTED_STRING_FIELDS[collectionName] || [];
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
-  if (strFields.length === 0 && numFields.length === 0) return doc;
+  const jsonFields = ENCRYPTED_JSON_FIELDS[collectionName] || [];
+  if (strFields.length === 0 && numFields.length === 0 && jsonFields.length === 0) {
+    return doc;
+  }
 
   const clone: Record<string, unknown> = {
     ...(doc as Record<string, unknown>),
@@ -606,6 +640,21 @@ export function encryptDocumentForStorage<T extends object>(
     }
   }
 
+  for (const field of jsonFields) {
+    const val = clone[field];
+    if (val !== undefined && val !== null && !isEncryptedValue(val)) {
+      clone[field] = encryptFieldValue(
+        collectionName,
+        field,
+        JSON.stringify(val),
+        {
+          recordId,
+          ownerId,
+        },
+      );
+    }
+  }
+
   clone.encryptionKeyVersion = ring.activeVersion;
   return clone as unknown as T;
 }
@@ -617,7 +666,10 @@ export function decryptDocumentFromStorage<T extends object>(
   if (!doc || typeof doc !== 'object') return doc ?? null;
   const strFields = ENCRYPTED_STRING_FIELDS[collectionName] || [];
   const numFields = ENCRYPTED_NUMBER_FIELDS[collectionName] || [];
-  if (strFields.length === 0 && numFields.length === 0) return doc;
+  const jsonFields = ENCRYPTED_JSON_FIELDS[collectionName] || [];
+  if (strFields.length === 0 && numFields.length === 0 && jsonFields.length === 0) {
+    return doc;
+  }
 
   const clone: Record<string, unknown> = {
     ...(doc as Record<string, unknown>),
@@ -652,7 +704,162 @@ export function decryptDocumentFromStorage<T extends object>(
     }
   }
 
+  for (const field of jsonFields) {
+    const val = clone[field];
+    if (val !== undefined && val !== null && typeof val === 'string') {
+      const dec = decryptFieldValue(
+        val,
+        recordId && ownerId
+          ? { collectionName, fieldName: field, recordId, ownerId }
+          : undefined,
+      );
+      if (dec) {
+        try {
+          clone[field] = JSON.parse(dec) as unknown;
+        } catch {
+          clone[field] = [];
+        }
+      }
+    }
+  }
+
   return clone as unknown as T;
+}
+
+function buildMediaAadBuffer(
+  ctx: MediaEncryptionContext,
+  mime: string,
+  ext: string,
+): Buffer {
+  const cat = ctx.categoryFolder.trim();
+  const own = ctx.ownerId.trim();
+  if (!cat || !own || !mime || !ext) {
+    throw new Error('[SECURITY] Contexto AAD incompleto para criptografia de mídia.');
+  }
+  return Buffer.from(
+    `pm:media:v2|cat=${cat}|own=${own}|mime=${mime}|ext=${ext}`,
+    'utf8',
+  );
+}
+
+export function isEncryptedMediaBuffer(buf: Buffer | null | undefined): boolean {
+  return Boolean(
+    buf &&
+      buf.length > MEDIA_BINARY_MAGIC.length + 2 &&
+      buf.subarray(0, MEDIA_BINARY_MAGIC.length).equals(MEDIA_BINARY_MAGIC),
+  );
+}
+
+/**
+ * Criptografa os bytes de imagem com AES-256-GCM (IV 96 bits aleatório, Auth Tag 128 bits
+ * e AAD vinculado à pasta de recurso e ao proprietário).
+ */
+export function encryptMediaBuffer(
+  plainBytes: Buffer,
+  ctx: MediaEncryptionContext,
+  meta: { mime: string; ext: 'jpg' | 'png' | 'webp' | 'gif' },
+): Buffer {
+  const ring = getKeyRingConfig();
+  const iv = randomBytes(IV_LENGTH_BYTES);
+  const aad = buildMediaAadBuffer(ctx, meta.mime, meta.ext);
+
+  const cipher = createCipheriv('aes-256-gcm', ring.activeKey, iv, {
+    authTagLength: AUTH_TAG_LENGTH_BYTES,
+  });
+  cipher.setAAD(aad);
+  const encrypted = Buffer.concat([cipher.update(plainBytes), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  const headerBuf = Buffer.from(
+    JSON.stringify({
+      v: ring.activeVersion,
+      mime: meta.mime,
+      ext: meta.ext,
+      iv: iv.toString('hex'),
+      tag: authTag.toString('hex'),
+    }),
+    'utf8',
+  );
+  const lenBuf = Buffer.allocUnsafe(2);
+  lenBuf.writeUInt16BE(headerBuf.length, 0);
+
+  return Buffer.concat([MEDIA_BINARY_MAGIC, lenBuf, headerBuf, encrypted]);
+}
+
+/**
+ * Descriptografa os bytes de imagem criptografados verificando GCM AuthTag e AAD.
+ */
+export function decryptMediaBuffer(
+  envelope: Buffer,
+  ctx: MediaEncryptionContext,
+): DecryptedMediaPayload {
+  if (!isEncryptedMediaBuffer(envelope)) {
+    throw new Error('[SECURITY] Conteúdo de imagem criptografada inválido.');
+  }
+
+  const headerLen = envelope.readUInt16BE(MEDIA_BINARY_MAGIC.length);
+  const headerStart = MEDIA_BINARY_MAGIC.length + 2;
+  const headerEnd = headerStart + headerLen;
+  if (headerLen <= 0 || headerEnd > envelope.length) {
+    throw new Error('[SECURITY] Cabeçalho inválido de imagem criptografada.');
+  }
+
+  let parsed: {
+    v?: string;
+    mime?: string;
+    ext?: 'jpg' | 'png' | 'webp' | 'gif';
+    iv?: string;
+    tag?: string;
+  };
+  try {
+    parsed = JSON.parse(
+      envelope.subarray(headerStart, headerEnd).toString('utf8'),
+    ) as typeof parsed;
+  } catch {
+    throw new Error('[SECURITY] Metadados corrompidos de imagem criptografada.');
+  }
+
+  const version = parsed.v || '';
+  const mime = parsed.mime || '';
+  const ext = parsed.ext;
+  if (
+    !version ||
+    !mime ||
+    (ext !== 'jpg' && ext !== 'png' && ext !== 'webp' && ext !== 'gif')
+  ) {
+    throw new Error('[SECURITY] Tipo de mídia inválido no envelope criptografado.');
+  }
+
+  const ring = getKeyRingConfig();
+  const key = ring.keysByVersion.get(version);
+  if (!key) {
+    throw new Error(
+      `[SECURITY] Versão de chave criptográfica '${version}' não encontrada para descriptografar mídia.`,
+    );
+  }
+
+  const iv = Buffer.from(parsed.iv || '', 'hex');
+  const authTag = Buffer.from(parsed.tag || '', 'hex');
+  if (iv.length !== IV_LENGTH_BYTES || authTag.length !== AUTH_TAG_LENGTH_BYTES) {
+    throw new Error('[SECURITY] Parâmetros IV ou GCM Auth Tag inválidos na mídia.');
+  }
+
+  const cipherBytes = envelope.subarray(headerEnd);
+  const aad = buildMediaAadBuffer(ctx, mime, ext);
+
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, iv, {
+      authTagLength: AUTH_TAG_LENGTH_BYTES,
+    });
+    decipher.setAAD(aad);
+    decipher.setAuthTag(authTag);
+    const buffer = Buffer.concat([decipher.update(cipherBytes), decipher.final()]);
+    return { buffer, mime, ext };
+  } catch {
+    throw new Error(
+      '[SECURITY] Falha de autenticação/integridade AES-256-GCM ao descriptografar mídia.',
+    );
+  }
 }
 
 /**

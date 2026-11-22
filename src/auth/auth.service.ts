@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { AuditService } from '../common/audit.service';
+import { buildProtectedMediaPath } from '../common/cloudinary.service';
 import { maskCpf, maskEmail, maskPhone, normalizeCpf } from '../common/cpf.utils';
 import { redactSensitiveText } from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
@@ -54,7 +55,12 @@ export class AuthService {
         maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
         maskedPhone: maskPhone(user.phone),
         hasCpf: Boolean(user.cpf),
-        avatarUrl: user.avatarUrl || null,
+        avatarUrl: buildProtectedMediaPath(
+          'avatar',
+          user.id,
+          user.avatarUrl,
+          user.avatarPublicId,
+        ),
       },
     };
   }

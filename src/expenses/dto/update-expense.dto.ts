@@ -6,6 +6,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
@@ -54,4 +55,10 @@ export class UpdateExpenseDto {
   @IsOptional()
   @IsIn(['dinheiro', 'pix', 'debito', 'credito', 'va', 'vr'])
   paymentMethod?: PaymentMethod;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Informe a data de pagamento no formato YYYY-MM-DD.',
+  })
+  paidAt?: string;
 }

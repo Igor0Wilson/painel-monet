@@ -183,4 +183,47 @@ describe('Expenses HTTP Component (Controller + Service + ValidationPipe)', () =
     expect(batchRes.body.totalPaid).toBe(1000);
     expect(batchRes.body.paymentMethod).toBe('debito');
   });
+
+  it('supports partial payment, full liquidation, and undo-pay via HTTP endpoints', async () => {
+    const createdRes = await request(app.getHttpServer())
+      .post('/expenses')
+      .send({
+        name: 'Seguro Auto',
+        accountTypeId: 'cat-food',
+        value: 800,
+        dueDate: '2099-12-20',
+        isRecurring: false,
+        paidAmount: 300,
+        paidAt: '2026-11-10',
+        paymentMethod: 'pix',
+      })
+      .expect(201);
+
+    const expId = createdRes.body.id as string;
+    expect(createdRes.body.isPaid).toBe(false);
+    expect(createdRes.body.paidAmount).toBe(300);
+    expect(createdRes.body.remainingAmount).toBe(500);
+    expect(createdRes.body.status).toBe('pendente');
+
+    const finishRes = await request(app.getHttpServer())
+      .patch(`/expenses/${expId}/pay`)
+      .send({ paymentMethod: 'debito', paidAt: '2026-11-18' })
+      .expect(200);
+
+    expect(finishRes.body.isPaid).toBe(true);
+    expect(finishRes.body.paidAmount).toBe(800);
+    expect(finishRes.body.remainingAmount).toBe(0);
+    expect(finishRes.body.payments).toHaveLength(2);
+
+    const undoRes = await request(app.getHttpServer())
+      .patch(`/expenses/${expId}/undo-pay`)
+      .send({})
+      .expect(200);
+
+    expect(undoRes.body.isPaid).toBe(false);
+    expect(undoRes.body.paidAmount).toBe(0);
+    expect(undoRes.body.remainingAmount).toBe(800);
+    expect(undoRes.body.payments).toEqual([]);
+    expect(undoRes.body.status).toBe('pendente');
+  });
 });

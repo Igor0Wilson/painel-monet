@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
@@ -44,6 +45,17 @@ export class CreateExpenseDto {
   @IsBoolean()
   @IsOptional()
   isPaid?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  paidAmount?: number;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Informe a data de pagamento no formato YYYY-MM-DD.',
+  })
+  paidAt?: string;
 
   @IsBoolean()
   @IsOptional()
