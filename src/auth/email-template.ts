@@ -14,6 +14,16 @@ export interface FamilyInviteEmailTemplateParams {
   logoUrl?: string;
 }
 
+export interface DueExpenseEmailTemplateParams {
+  userName: string;
+  expenseName: string;
+  amountFormatted: string;
+  dueDateFormatted: string;
+  kind: 'due_tomorrow' | 'due_today';
+  actionUrl: string;
+  logoUrl?: string;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -287,6 +297,164 @@ export function buildPasswordResetEmailHtml(
           <tr>
             <td style="background-color:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 32px;text-align:center;font-size:11px;color:#94a3b8;">
               &copy; ${year} Painel Monet · E-mail automático de segurança, não responda.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+export function buildDueExpenseEmailSubject(
+  params: Pick<
+    DueExpenseEmailTemplateParams,
+    'expenseName' | 'dueDateFormatted' | 'kind'
+  >,
+): string {
+  const safeName = params.expenseName.trim() || 'Conta';
+  if (params.kind === 'due_today') {
+    return `Sua conta "${safeName}" vence hoje (${params.dueDateFormatted}) — Painel Monet`;
+  }
+  return `Sua conta "${safeName}" vence amanhã (${params.dueDateFormatted}) — Painel Monet`;
+}
+
+export function buildDueExpenseEmailText(
+  params: DueExpenseEmailTemplateParams,
+): string {
+  const firstName = params.userName.trim().split(/\s+/)[0] || 'Cliente';
+  const headline =
+    params.kind === 'due_today'
+      ? `Sua conta "${params.expenseName}" vence hoje (${params.dueDateFormatted}).`
+      : `Sua conta "${params.expenseName}" vence amanhã (${params.dueDateFormatted}).`;
+
+  return [
+    `Olá, ${firstName}!`,
+    '',
+    headline,
+    `Valor em aberto: ${params.amountFormatted}`,
+    '',
+    'Para evitar juros ou multas e manter seu saldo sempre atualizado, acesse o Painel Monet para registrar o pagamento:',
+    '',
+    params.actionUrl,
+    '',
+    'Caso você já tenha efetuado o pagamento, basta marcar a conta como paga no aplicativo para não receber novos avisos.',
+    '',
+    'Painel Monet — Gestão Patrimonial & Controle Financeiro',
+  ].join('\n');
+}
+
+export function buildDueExpenseEmailHtml(
+  params: DueExpenseEmailTemplateParams,
+): string {
+  const firstName = escapeHtml(
+    params.userName.trim().split(/\s+/)[0] || 'Cliente',
+  );
+  const expenseName = escapeHtml(params.expenseName);
+  const amountFormatted = escapeHtml(params.amountFormatted);
+  const dueDateFormatted = escapeHtml(params.dueDateFormatted);
+  const safeUrl = escapeHtml(params.actionUrl);
+  const safeLogoUrl = params.logoUrl ? escapeHtml(params.logoUrl) : '';
+  const isToday = params.kind === 'due_today';
+  const year = new Date().getFullYear();
+
+  const badgeBg = isToday ? '#fef2f2' : '#fffbeb';
+  const badgeTextColor = isToday ? '#b91c1c' : '#b45309';
+  const badgeLabel = isToday
+    ? 'VENCIMENTO HOJE'
+    : 'VENCIMENTO AMANHÃ';
+  const headline = isToday
+    ? `Sua conta <strong>${expenseName}</strong> vence hoje!`
+    : `Sua conta <strong>${expenseName}</strong> vence amanhã!`;
+  const buttonColor = isToday ? '#dc2626' : '#059669';
+
+  const logoMarkup = safeLogoUrl
+    ? `<img src="${safeLogoUrl}" alt="Painel Monet" width="44" height="44" style="display:block;border-radius:12px;border:0;" />`
+    : `<div style="width:44px;height:44px;border-radius:12px;background:#10b981;color:#ffffff;font-weight:700;font-size:20px;line-height:44px;text-align:center;">$</div>`;
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(buildDueExpenseEmailSubject(params))}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f1f5f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:560px;background-color:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f172a 0%,#064e3b 100%);padding:28px 32px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="padding-right:14px;vertical-align:middle;">
+                    ${logoMarkup}
+                  </td>
+                  <td style="vertical-align:middle;">
+                    <div style="font-size:17px;font-weight:700;color:#ffffff;letter-spacing:-0.01em;">Painel Monet</div>
+                    <div style="font-size:12px;color:#94a3b8;margin-top:2px;">Gestão Patrimonial &amp; Controle Financeiro</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:32px;">
+              <div style="display:inline-block;padding:5px 12px;border-radius:999px;background-color:${badgeBg};color:${badgeTextColor};font-size:11px;font-weight:700;letter-spacing:0.06em;margin-bottom:16px;">
+                ${badgeLabel}
+              </div>
+
+              <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.35;font-weight:700;color:#0f172a;">
+                ${headline}
+              </h1>
+
+              <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:#334155;">
+                Olá, <strong>${firstName}</strong>! Este é um lembrete automático para ajudar você a manter suas contas em dia.
+              </p>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;margin-bottom:24px;">
+                <tr>
+                  <td style="padding:16px 18px;">
+                    <div style="font-size:12px;color:#64748b;margin-bottom:4px;">Conta</div>
+                    <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:12px;">${expenseName}</div>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                      <tr>
+                        <td style="width:50%;">
+                          <div style="font-size:12px;color:#64748b;">Vencimento</div>
+                          <div style="font-size:14px;font-weight:700;color:#0f172a;margin-top:2px;">${dueDateFormatted}</div>
+                        </td>
+                        <td style="width:50%;">
+                          <div style="font-size:12px;color:#64748b;">Valor</div>
+                          <div style="font-size:14px;font-weight:700;color:#059669;margin-top:2px;">${amountFormatted}</div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:22px;">
+                <tr>
+                  <td align="center">
+                    <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background-color:${buttonColor};color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;padding:14px 30px;border-radius:12px;">
+                      Acessar Painel Monet
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0;font-size:12px;line-height:1.6;color:#64748b;">
+                Se você já pagou esta conta, acesse o painel e marque-a como paga para interromper os lembretes.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background-color:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 32px;text-align:center;font-size:11px;color:#94a3b8;">
+              &copy; ${year} Painel Monet · Lembrete automático de vencimento.
             </td>
           </tr>
         </table>

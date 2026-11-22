@@ -39,11 +39,17 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INVESTMENTS]: ['name', 'category', 'notes'],
   [COLLECTIONS.FAMILY_MEMBERS]: ['userCpf'],
   [COLLECTIONS.FAMILY_INVITES]: ['inviterCpf', 'inviteeCpf'],
+  [COLLECTIONS.BIOMETRIC_CREDENTIALS]: [
+    'deviceLabel',
+    'publicKeySpkiPem',
+    'nativeSecretHex',
+  ],
+  [COLLECTIONS.BIOMETRIC_CHALLENGES]: ['nonce', 'pendingSecretHex'],
 };
 
 const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['value'],
-  [COLLECTIONS.EXPENSES]: ['value', 'paidAmount'],
+  [COLLECTIONS.EXPENSES]: ['value', 'paidAmount', 'discountAmount'],
   [COLLECTIONS.INVESTMENTS]: ['amount'],
   [COLLECTIONS.USERS]: [
     'emergencyFund',
@@ -196,7 +202,7 @@ export function getKeyRingConfig(): KeyRingConfig {
   const isDev = isDevelopmentFirebaseEnv();
   const activeVersion = resolveKeyVersion(
     (isDev ? process.env.DATA_ENCRYPTION_KEY_VERSION_DEV : undefined) ||
-      process.env.DATA_ENCRYPTION_KEY_VERSION,
+    process.env.DATA_ENCRYPTION_KEY_VERSION,
   );
   const activeKeyVarName =
     isDev && process.env.DATA_ENCRYPTION_KEY_DEV?.trim()
@@ -212,7 +218,7 @@ export function getKeyRingConfig(): KeyRingConfig {
   keysByVersion.set(activeVersion, activeKey);
   parsePreviousKeys(
     (isDev ? process.env.DATA_ENCRYPTION_KEY_PREVIOUS_DEV : undefined) ||
-      process.env.DATA_ENCRYPTION_KEY_PREVIOUS,
+    process.env.DATA_ENCRYPTION_KEY_PREVIOUS,
     keysByVersion,
   );
 
@@ -227,14 +233,14 @@ export function getKeyRingConfig(): KeyRingConfig {
   const blindIndexKey = explicitBlindKey
     ? parseAes256Key(explicitBlindKey, blindKeyVarName)
     : Buffer.from(
-        hkdfSync(
-          'sha256',
-          activeKey,
-          BLIND_INDEX_SALT,
-          BLIND_INDEX_INFO,
-          KEY_LENGTH_BYTES,
-        ),
-      );
+      hkdfSync(
+        'sha256',
+        activeKey,
+        BLIND_INDEX_SALT,
+        BLIND_INDEX_INFO,
+        KEY_LENGTH_BYTES,
+      ),
+    );
 
   return {
     activeVersion,
@@ -745,8 +751,8 @@ function buildMediaAadBuffer(
 export function isEncryptedMediaBuffer(buf: Buffer | null | undefined): boolean {
   return Boolean(
     buf &&
-      buf.length > MEDIA_BINARY_MAGIC.length + 2 &&
-      buf.subarray(0, MEDIA_BINARY_MAGIC.length).equals(MEDIA_BINARY_MAGIC),
+    buf.length > MEDIA_BINARY_MAGIC.length + 2 &&
+    buf.subarray(0, MEDIA_BINARY_MAGIC.length).equals(MEDIA_BINARY_MAGIC),
   );
 }
 

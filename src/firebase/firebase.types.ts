@@ -65,6 +65,8 @@ export interface ExpenseDoc {
   sourceExpenseId?: string | null;
   isPaid: boolean;
   paidAmount?: number;
+  discountAmount?: number;
+  isEarlyPayment?: boolean;
   paidAt?: string | null;
   payments?: ExpensePaymentPart[];
   isCreditCard: boolean;
@@ -166,6 +168,55 @@ export interface AuditLogDoc {
   expiresAtMs: number;
 }
 
+export type ExpenseReminderKind = 'due_tomorrow' | 'due_today';
+
+export interface ExpenseReminderDoc {
+  id: string;
+  userId: string;
+  expenseId: string;
+  dueDate: string;
+  kind: ExpenseReminderKind;
+  emailSentAt: string | null;
+  deviceNotifiedAt: string | null;
+  createdAt: string;
+  expiresAtMs: number;
+}
+
+export type BiometricKind = 'facial' | 'fingerprint' | 'biometric';
+export type BiometricPlatform = 'web' | 'pwa' | 'mobile_ios' | 'mobile_android';
+export type BiometricProtocol = 'webauthn' | 'native_hmac';
+
+export interface BiometricCredentialDoc {
+  id: string;
+  userId: string;
+  credentialId: string;
+  protocol: BiometricProtocol;
+  kind: BiometricKind;
+  platform: BiometricPlatform;
+  deviceLabel: string;
+  publicKeySpkiPem?: string | null;
+  nativeSecretHex?: string | null;
+  signCount: number;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string | null;
+}
+
+export interface BiometricChallengeDoc {
+  id: string;
+  nonce: string;
+  purpose: 'register' | 'login';
+  userId?: string | null;
+  credentialId?: string | null;
+  pendingSecretHex?: string | null;
+  protocol: BiometricProtocol;
+  kind: BiometricKind;
+  createdAt: string;
+  expiresAtMs: number;
+  consumed: boolean;
+}
+
 export interface RateLimitDoc {
   id: string;
   totalHits: number;
@@ -180,6 +231,9 @@ export const COLLECTIONS = {
   EMAIL_LOCKS: 'email_locks',
   ACCOUNT_TYPES: 'account_types',
   EXPENSES: 'expenses',
+  EXPENSE_REMINDERS: 'expense_reminders',
+  BIOMETRIC_CREDENTIALS: 'biometric_credentials',
+  BIOMETRIC_CHALLENGES: 'biometric_challenges',
   INCOME: 'income',
   INVESTMENTS: 'investments',
   FAMILY_GROUPS: 'family_groups',

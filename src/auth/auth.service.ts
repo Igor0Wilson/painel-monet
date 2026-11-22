@@ -42,6 +42,10 @@ export class AuthService {
   ) {}
 
   private buildAuthResponse(user: UserDoc) {
+    return this.issueJwtSession(user);
+  }
+
+  issueJwtSession(user: UserDoc) {
     const payload = {
       userId: user.id,
       tv: user.tokenVersion ?? 1,

@@ -18,7 +18,9 @@ import type { Response } from 'express';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import type { UploadedImageFile } from '../common/cloudinary.service';
+import { DueRemindersService } from './due-reminders.service';
 import { ExpensesService } from './expenses.service';
+import { AckDueRemindersDto } from './dto/ack-due-reminders.dto';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
@@ -30,11 +32,33 @@ import { UndoPaymentDto } from './dto/undo-payment.dto';
 @UseGuards(JwtAuthGuard)
 @Controller('expenses')
 export class ExpensesController {
-  constructor(private readonly service: ExpensesService) {}
+  constructor(
+    private readonly service: ExpensesService,
+    private readonly dueRemindersService: DueRemindersService,
+  ) {}
 
   @Get()
   findAll(@Request() req: AuthenticatedRequest, @Query('scope') scope?: string) {
     return this.service.findAll(req.user.userId, scope);
+  }
+
+  @Get('due-reminders')
+  checkDueReminders(@Request() req: AuthenticatedRequest) {
+    return this.dueRemindersService.checkAndDispatchUserReminders(
+      req.user.userId,
+      { sendEmails: true },
+    );
+  }
+
+  @Post('due-reminders/ack')
+  acknowledgeDueReminders(
+    @Body() dto: AckDueRemindersDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.dueRemindersService.acknowledgeDeviceNotifications(
+      req.user.userId,
+      dto.ids,
+    );
   }
 
   @Post()

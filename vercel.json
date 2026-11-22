@@ -3,5 +3,11 @@
   "framework": "nestjs",
   "installCommand": "npm install --include=dev",
   "buildCommand": "npm run build",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "crons": [
+    {
+      "path": "/expenses/cron/due-reminders",
+      "schedule": "0 11 * * *"
+    }
+  ]
 }

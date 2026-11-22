@@ -38,6 +38,45 @@ export function getTodayParts(): DateParts {
   };
 }
 
+export function getBrazilTodayParts(referenceDate: Date = new Date()): DateParts {
+  try {
+    const formatted = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(referenceDate);
+    const [y, m, d] = formatted.split('-').map(Number);
+    if (y && m && d) {
+      return { year: y, month: m, day: d };
+    }
+  } catch {
+    // Fallback para UTC-3 se Intl timezone indisponível no ambiente
+  }
+  const shifted = new Date(referenceDate.getTime() - 3 * 60 * 60 * 1000);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+export function addDaysDateOnly(
+  dateOrParts: string | DateParts,
+  days: number,
+): string {
+  const start =
+    typeof dateOrParts === 'string' ? parseDateOnly(dateOrParts) : dateOrParts;
+  const target = new Date(
+    Date.UTC(start.year, start.month - 1, start.day + days),
+  );
+  return formatDateOnly({
+    year: target.getUTCFullYear(),
+    month: target.getUTCMonth() + 1,
+    day: target.getUTCDate(),
+  });
+}
+
 export function compareDateParts(a: DateParts, b: DateParts): number {
   if (a.year !== b.year) return a.year - b.year;
   if (a.month !== b.month) return a.month - b.month;

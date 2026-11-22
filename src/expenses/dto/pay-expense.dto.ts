@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsDateString,
   IsIn,
   IsInt,
@@ -24,6 +25,10 @@ export class PayExpenseDto {
   @IsNumber({}, { message: 'Informe um valor numérico válido.' })
   @Min(0.01, { message: 'O valor do pagamento deve ser maior que zero.' })
   amount?: number;
+
+  @IsOptional()
+  @IsBoolean({ message: 'Informe um valor booleano válido para pagamento antecipado.' })
+  isEarlyPayment?: boolean;
 
   @IsOptional()
   @Matches(/^\d{4}-\d{2}-\d{2}$/, {

@@ -32,8 +32,11 @@ import {
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   AccountTypeDoc,
+  BiometricChallengeDoc,
+  BiometricCredentialDoc,
   COLLECTIONS,
   ExpenseDoc,
+  ExpenseReminderDoc,
   FamilyInviteDoc,
   FamilyMemberDoc,
   IncomeDoc,
@@ -605,6 +608,7 @@ export class UsersService {
       }
       const val = Number(exp.value || 0);
       const hasParts = Array.isArray(exp.payments) && exp.payments.length > 0;
+      const isEarlyDiscount = Boolean(exp.isEarlyPayment) && Boolean(exp.isPaid);
       const paidAmt = hasParts
         ? Math.min(
           val,
@@ -615,9 +619,15 @@ export class UsersService {
           ),
         )
         : exp.isPaid
-          ? val
+          ? isEarlyDiscount && Number(exp.paidAmount || 0) > 0
+            ? Math.min(val, Number(exp.paidAmount))
+            : val
           : Math.min(val, Number(exp.paidAmount || 0));
-      const remainingAmt = Math.max(0, Number((val - paidAmt).toFixed(2)));
+      const remainingAmt = exp.isPaid
+        ? 0
+        : Math.max(0, Number((val - paidAmt).toFixed(2)));
+      const effectiveExpenseAmt =
+        isEarlyDiscount && paidAmt > 0 ? paidAmt : val;
 
       if (hasParts) {
         for (const part of exp.payments!) {
@@ -645,7 +655,7 @@ export class UsersService {
         typesById.get(exp.accountTypeId)?.name,
       );
       expensesByCategory[catName] = Number(
-        ((expensesByCategory[catName] || 0) + val).toFixed(2),
+        ((expensesByCategory[catName] || 0) + effectiveExpenseAmt).toFixed(2),
       );
       return {
         id: exp.id,
@@ -655,6 +665,8 @@ export class UsersService {
         category: catName,
         value: val,
         paidAmount: paidAmt,
+        discountAmount: Number(exp.discountAmount || 0),
+        isEarlyPayment: isEarlyDiscount,
         remainingAmount: remainingAmt,
         paidAt: exp.paidAt || null,
         payments: exp.payments || [],
@@ -810,9 +822,12 @@ export class UsersService {
 
     const [
       expenses,
+      expenseReminders,
+      biometricCredentials,
+      biometricChallenges,
       incomes,
-      investments,
       accountTypes,
+      investments,
       memberships,
       sentInvites,
       receivedInvites,
@@ -822,14 +837,29 @@ export class UsersService {
         'userId',
         userId,
       ),
-      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
-      this.firebase.findByField<InvestmentDoc>(
-        COLLECTIONS.INVESTMENTS,
+      this.firebase.findByField<ExpenseReminderDoc>(
+        COLLECTIONS.EXPENSE_REMINDERS,
         'userId',
         userId,
       ),
+      this.firebase.findByField<BiometricCredentialDoc>(
+        COLLECTIONS.BIOMETRIC_CREDENTIALS,
+        'userId',
+        userId,
+      ),
+      this.firebase.findByField<BiometricChallengeDoc>(
+        COLLECTIONS.BIOMETRIC_CHALLENGES,
+        'userId',
+        userId,
+      ),
+      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
       this.firebase.findByField<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
+        'userId',
+        userId,
+      ),
+      this.firebase.findByField<InvestmentDoc>(
+        COLLECTIONS.INVESTMENTS,
         'userId',
         userId,
       ),
@@ -870,6 +900,15 @@ export class UsersService {
     await Promise.all([
       ...expenses.map((doc) =>
         this.firebase.deleteDoc(COLLECTIONS.EXPENSES, doc.id),
+      ),
+      ...expenseReminders.map((doc) =>
+        this.firebase.deleteDoc(COLLECTIONS.EXPENSE_REMINDERS, doc.id),
+      ),
+      ...biometricCredentials.map((doc) =>
+        this.firebase.deleteDoc(COLLECTIONS.BIOMETRIC_CREDENTIALS, doc.id),
+      ),
+      ...biometricChallenges.map((doc) =>
+        this.firebase.deleteDoc(COLLECTIONS.BIOMETRIC_CHALLENGES, doc.id),
       ),
       ...incomes.map((doc) =>
         this.firebase.deleteDoc(COLLECTIONS.INCOME, doc.id),

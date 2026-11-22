@@ -81,7 +81,10 @@ export class BalanceService {
 
       if (curr.isPaid) {
         if (curr.paymentMethod === 'credito') continue;
-        const val = Number(curr.value);
+        const val =
+          curr.isEarlyPayment && Number(curr.paidAmount || 0) > 0
+            ? Number(Math.min(Number(curr.value), Number(curr.paidAmount)))
+            : Number(curr.value);
         if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
           foodAllowanceUsed += val;
         } else {
@@ -997,11 +1000,15 @@ export class BalanceService {
       const isRecurringInMonth =
         Boolean(e.isRecurring) && targetMonthIdx >= expMonthIdx;
 
+      const effectiveVal =
+        e.isPaid && e.isEarlyPayment && Number(e.paidAmount || 0) > 0
+          ? Number(Math.min(Number(e.value), Number(e.paidAmount)))
+          : Number(e.value);
+
       if (isSameMonth || isRecurringInMonth) {
-        const val = Number(e.value);
         const rawCatName = typesById.get(e.accountTypeId)?.name;
         const catName = normalizeOfficialCategory(rawCatName);
-        categoryMap.set(catName, (categoryMap.get(catName) || 0) + val);
+        categoryMap.set(catName, (categoryMap.get(catName) || 0) + effectiveVal);
       }
 
       if (Array.isArray(e.payments) && e.payments.length > 0) {
@@ -1018,9 +1025,8 @@ export class BalanceService {
           }
         }
       } else if (e.isPaid && isSameMonth && e.paymentMethod !== 'credito') {
-        const val = Number(e.value);
-        monthTotalExpenses += val;
-        dailyExpenseMap.set(d.day, (dailyExpenseMap.get(d.day) || 0) + val);
+        monthTotalExpenses += effectiveVal;
+        dailyExpenseMap.set(d.day, (dailyExpenseMap.get(d.day) || 0) + effectiveVal);
       }
     });
 

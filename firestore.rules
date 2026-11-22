@@ -25,6 +25,18 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /expense_reminders/{docId} {
+      allow read, write: if false;
+    }
+
+    match /biometric_credentials/{docId} {
+      allow read, write: if false;
+    }
+
+    match /biometric_challenges/{docId} {
+      allow read, write: if false;
+    }
+
     match /income/{docId} {
       allow read, write: if false;
     }

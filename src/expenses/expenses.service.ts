@@ -44,6 +44,8 @@ export type ExpenseStatus = 'pago' | 'em_atraso' | 'pendente';
 export interface ExpenseWithStatus extends ExpenseDoc {
   status: ExpenseStatus;
   paidAmount: number;
+  discountAmount: number;
+  isEarlyPayment: boolean;
   remainingAmount: number;
   isPartiallyPaid: boolean;
   paidAt: string | null;
@@ -122,9 +124,25 @@ export class ExpensesService {
     return values;
   }
 
+  private getEffectiveExpenseValue(expense: ExpenseDoc): number {
+    const val = Number(expense.value || 0);
+    if (
+      expense.isPaid &&
+      expense.isEarlyPayment &&
+      expense.paidAmount !== undefined &&
+      expense.paidAmount !== null &&
+      Number(expense.paidAmount) > 0
+    ) {
+      return Number(Math.min(val, Number(expense.paidAmount)).toFixed(2));
+    }
+    return Number(val.toFixed(2));
+  }
+
   private resolveExpensePaymentSummary(expense: ExpenseDoc): {
     totalValue: number;
     paidAmount: number;
+    discountAmount: number;
+    isEarlyPayment: boolean;
     remainingAmount: number;
     isPaid: boolean;
     isPartiallyPaid: boolean;
@@ -132,6 +150,7 @@ export class ExpensesService {
     payments: ExpensePaymentPart[];
   } {
     const totalValue = Number(Number(expense.value || 0).toFixed(2));
+    const isEarlyPayment = Boolean(expense.isEarlyPayment);
     const rawPayments = Array.isArray(expense.payments) ? expense.payments : [];
     const sortedPayments = [...rawPayments]
       .filter((p) => p && Number(p.amount) > 0)
@@ -159,14 +178,27 @@ export class ExpensesService {
       paidAmount = expense.isPaid ? totalValue : 0;
     }
 
-    if (expense.isPaid && paidAmount < totalValue - 0.009) {
+    if (expense.isPaid && !isEarlyPayment && paidAmount < totalValue - 0.009) {
       paidAmount = totalValue;
     }
 
     paidAmount = Math.max(0, Math.min(totalValue, Number(paidAmount.toFixed(2))));
-    const remainingAmount = Number(Math.max(0, totalValue - paidAmount).toFixed(2));
+    const computedDiscount =
+      expense.isPaid && isEarlyPayment
+        ? Number(Math.max(0, totalValue - paidAmount).toFixed(2))
+        : 0;
+    const discountAmount =
+      computedDiscount > 0
+        ? computedDiscount
+        : expense.isPaid && isEarlyPayment && Number(expense.discountAmount || 0) > 0
+          ? Number(Number(expense.discountAmount).toFixed(2))
+          : 0;
     const isPaid =
-      Boolean(expense.isPaid) || (totalValue > 0 && remainingAmount <= 0.009);
+      Boolean(expense.isPaid) ||
+      (totalValue > 0 && Number((totalValue - paidAmount).toFixed(2)) <= 0.009);
+    const remainingAmount = isPaid
+      ? 0
+      : Number(Math.max(0, totalValue - paidAmount).toFixed(2));
     const isPartiallyPaid = !isPaid && paidAmount > 0.009;
     const paidAt =
       expense.paidAt ||
@@ -178,6 +210,8 @@ export class ExpensesService {
     return {
       totalValue,
       paidAmount,
+      discountAmount,
+      isEarlyPayment: isEarlyPayment && discountAmount > 0,
       remainingAmount,
       isPaid,
       isPartiallyPaid,
@@ -195,6 +229,8 @@ export class ExpensesService {
       ...expense,
       isPaid: summary.isPaid,
       paidAmount: summary.paidAmount,
+      discountAmount: summary.discountAmount,
+      isEarlyPayment: summary.isEarlyPayment,
       paidAt: summary.paidAt,
       payments: summary.payments,
       receiptUrl: buildProtectedMediaPath(
@@ -209,6 +245,8 @@ export class ExpensesService {
     return {
       ...normalizedDoc,
       paidAmount: summary.paidAmount,
+      discountAmount: summary.discountAmount,
+      isEarlyPayment: summary.isEarlyPayment,
       remainingAmount: summary.remainingAmount,
       isPartiallyPaid: summary.isPartiallyPaid,
       paidAt: summary.paidAt,
@@ -595,6 +633,7 @@ export class ExpensesService {
     const paidDate = dto?.paidAt || formatDateOnly(getTodayParts());
     const now = new Date().toISOString();
 
+    const isEarlyRequested = Boolean(dto?.isEarlyPayment);
     let payAmount = summary.remainingAmount;
     if (dto?.amount !== undefined) {
       const requestedAmount = Number(Number(dto.amount).toFixed(2));
@@ -614,7 +653,9 @@ export class ExpensesService {
           : requestedAmount;
     }
 
-    const isPartial = payAmount < summary.remainingAmount - 0.009;
+    const isEarlyDiscount =
+      isEarlyRequested && payAmount < summary.remainingAmount - 0.009;
+    const isPartial = !isEarlyRequested && payAmount < summary.remainingAmount - 0.009;
 
     if (paymentMethod === 'credito' && isPartial) {
       throw new BadRequestException(
@@ -635,12 +676,22 @@ export class ExpensesService {
       const nextPaidAmount = Number(
         Math.min(summary.totalValue, summary.paidAmount + payAmount).toFixed(2),
       );
-      const nextIsPaid = nextPaidAmount >= summary.totalValue - 0.009;
-      const finalPaidAmount = nextIsPaid ? summary.totalValue : nextPaidAmount;
+      const nextIsPaid =
+        isEarlyRequested || nextPaidAmount >= summary.totalValue - 0.009;
+      const finalPaidAmount = nextIsPaid
+        ? isEarlyDiscount
+          ? nextPaidAmount
+          : summary.totalValue
+        : nextPaidAmount;
+      const discountAmount = isEarlyDiscount
+        ? Number(Math.max(0, summary.totalValue - finalPaidAmount).toFixed(2))
+        : 0;
 
       await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
         isPaid: nextIsPaid,
         paidAmount: finalPaidAmount,
+        discountAmount,
+        isEarlyPayment: discountAmount > 0,
         paidAt: paidDate,
         paymentMethod,
         payments: nextPayments,
@@ -660,6 +711,8 @@ export class ExpensesService {
         ...expense,
         isPaid: nextIsPaid,
         paidAmount: finalPaidAmount,
+        discountAmount,
+        isEarlyPayment: discountAmount > 0,
         paidAt: paidDate,
         paymentMethod,
         payments: nextPayments,
@@ -685,6 +738,12 @@ export class ExpensesService {
     }
 
     const nextPayments = [...summary.payments, newPart];
+    const finalCreditPaidAmount = isEarlyDiscount
+      ? Number(Math.min(summary.totalValue, summary.paidAmount + payAmount).toFixed(2))
+      : summary.totalValue;
+    const creditDiscountAmount = isEarlyDiscount
+      ? Number(Math.max(0, summary.totalValue - finalCreditPaidAmount).toFixed(2))
+      : 0;
     const resolvedCardBank =
       dto?.cardBank !== undefined
         ? normalizeOptionalText(dto.cardBank)
@@ -696,7 +755,9 @@ export class ExpensesService {
 
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
       isPaid: true,
-      paidAmount: summary.totalValue,
+      paidAmount: finalCreditPaidAmount,
+      discountAmount: creditDiscountAmount,
+      isEarlyPayment: creditDiscountAmount > 0,
       paidAt: paidDate,
       paymentMethod: 'credito',
       cardBank: resolvedCardBank,
@@ -710,7 +771,7 @@ export class ExpensesService {
       userId,
       accountTypeId: expense.accountTypeId,
       baseName,
-      totalValue: summary.remainingAmount,
+      totalValue: payAmount,
       installments,
       firstInstallmentDate,
       sourceExpenseId: expense.id,
@@ -733,7 +794,9 @@ export class ExpensesService {
     const updatedDoc: ExpenseDoc = {
       ...expense,
       isPaid: true,
-      paidAmount: summary.totalValue,
+      paidAmount: finalCreditPaidAmount,
+      discountAmount: creditDiscountAmount,
+      isEarlyPayment: creditDiscountAmount > 0,
       paidAt: paidDate,
       paymentMethod: 'credito',
       cardBank: resolvedCardBank,
@@ -832,6 +895,8 @@ export class ExpensesService {
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
       isPaid: nextIsPaid,
       paidAmount: nextPaidAmount,
+      discountAmount: 0,
+      isEarlyPayment: false,
       paidAt: nextPaidAt,
       paymentMethod: nextPaymentMethod,
       payments: nextPayments,
@@ -852,6 +917,8 @@ export class ExpensesService {
       ...expense,
       isPaid: nextIsPaid,
       paidAmount: nextPaidAmount,
+      discountAmount: 0,
+      isEarlyPayment: false,
       paidAt: nextPaidAt,
       paymentMethod: nextPaymentMethod,
       payments: nextPayments,
@@ -1516,10 +1583,10 @@ export class ExpensesService {
           day: clampedDay,
         };
         if (compareDateParts(currentMonthDue, today) <= 0) {
-          total += Number(expense.value);
+          total += this.getEffectiveExpenseValue(expense);
         }
       } else if (expense.isPaid) {
-        total += Number(expense.value);
+        total += this.getEffectiveExpenseValue(expense);
       }
     }
 

@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { BiometricService } from './biometric.service';
 import { EmailSenderService } from './email-sender.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsersModule } from '../users/users.module';
@@ -32,7 +33,8 @@ import { UsersModule } from '../users/users.module';
       },
     }),
   ],
-  providers: [AuthService, EmailSenderService, JwtStrategy],
+  providers: [AuthService, BiometricService, EmailSenderService, JwtStrategy],
   controllers: [AuthController],
+  exports: [EmailSenderService],
 })
 export class AuthModule {}
