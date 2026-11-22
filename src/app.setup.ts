@@ -14,6 +14,10 @@ function getAllowedOrigins(): string[] {
   const isProduction =
     process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
+  const defaultProductionOrigins = isProduction
+    ? ['https://painel-monet-front.vercel.app']
+    : [];
+
   const devOrigins = isProduction
     ? []
     : [
@@ -31,7 +35,12 @@ function getAllowedOrigins(): string[] {
   ];
 
   return Array.from(
-    new Set([...configuredOrigins, ...devOrigins, ...mobileWebViewOrigins]),
+    new Set([
+      ...configuredOrigins,
+      ...defaultProductionOrigins,
+      ...devOrigins,
+      ...mobileWebViewOrigins,
+    ]),
   );
 }
 
