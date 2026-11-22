@@ -1,9 +1,58 @@
 rules_version = '2';
 
+// Cloud Firestore permanece 100% isolado de acessos diretos via SDK cliente Web/Mobile.
+// Toda leitura, gravação, descriptografia AES-256-GCM, checagem de autorização/IDOR e auditoria
+// ocorrem exclusivamente no backend NestJS autenticado por Firebase Admin SDK (Service Account).
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Todo acesso passa exclusivamente pelo backend NestJS autenticado via Firebase Admin SDK (JWT + CPF + ID).
-    // Bloqueia 100% de leitura e escrita direta pelo cliente web para proteção máxima de dados financeiros e CPF.
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    match /cpf_locks/{lockId} {
+      allow read, write: if false;
+    }
+
+    match /email_locks/{lockId} {
+      allow read, write: if false;
+    }
+
+    match /account_types/{docId} {
+      allow read, write: if false;
+    }
+
+    match /expenses/{docId} {
+      allow read, write: if false;
+    }
+
+    match /income/{docId} {
+      allow read, write: if false;
+    }
+
+    match /investments/{docId} {
+      allow read, write: if false;
+    }
+
+    match /family_groups/{docId} {
+      allow read, write: if false;
+    }
+
+    match /family_members/{docId} {
+      allow read, write: if false;
+    }
+
+    match /family_invites/{docId} {
+      allow read, write: if false;
+    }
+
+    match /audit_logs/{docId} {
+      allow read, write: if false;
+    }
+
+    match /rate_limits/{docId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

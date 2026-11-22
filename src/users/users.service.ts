@@ -5,16 +5,28 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { createHash, randomBytes, randomUUID as uuidv4 } from 'crypto';
+import { randomBytes, randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
+import { AuditService } from '../common/audit.service';
+import {
+  CloudinaryService,
+  type UploadedImageFile,
+} from '../common/cloudinary.service';
 import {
   isValidCpf,
   maskCpf,
+  maskEmail,
+  maskPhone,
   normalizeCpf,
   normalizePhone,
 } from '../common/cpf.utils';
-import { computeDeterministicHash } from '../common/data-crypto.utils';
+import {
+  computeBlindIndex,
+  computeDeterministicHash,
+  redactSensitiveText,
+} from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   AccountTypeDoc,
@@ -42,7 +54,11 @@ export interface RegisterFirebaseUserParams {
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
-  constructor(private readonly firebase: FirebaseService) {}
+  constructor(
+    private readonly firebase: FirebaseService,
+    @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly cloudinaryService?: CloudinaryService,
+  ) {}
 
   async createFromFirebase(params: RegisterFirebaseUserParams): Promise<UserDoc> {
     const normalizedEmail = params.email.trim().toLowerCase();
@@ -114,6 +130,7 @@ export class UsersService {
       firebaseUid: params.firebaseUid,
       authProvider: params.authProvider,
       isActive: true,
+      tokenVersion: 1,
       deactivatedAt: null,
       deactivatedAtMs: null,
       emergencyFund: 0,
@@ -163,6 +180,127 @@ export class UsersService {
 
   async findById(id: string): Promise<UserDoc | null> {
     return this.firebase.findById<UserDoc>(COLLECTIONS.USERS, id);
+  }
+
+  async getEditableProfile(userId: string) {
+    const user = await this.findById(userId);
+    if (!user || user.isActive === false) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'users.profile.read_sensitive',
+      resource: 'users',
+      resourceId: user.id,
+      outcome: 'ALLOW',
+    });
+
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      cpf: user.cpf,
+      phone: user.phone,
+      maskedEmail: maskEmail(user.email),
+      maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
+      maskedPhone: maskPhone(user.phone),
+      hasCpf: Boolean(user.cpf),
+      avatarUrl: user.avatarUrl || null,
+    };
+  }
+
+  async updateAvatar(userId: string, file: UploadedImageFile) {
+    const user = await this.findById(userId);
+    if (!user || user.isActive === false) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+    if (!this.cloudinaryService) {
+      throw new BadRequestException(
+        'Serviço de armazenamento de imagens indisponível.',
+      );
+    }
+
+    const uploaded = await this.cloudinaryService.uploadImage(
+      file,
+      'avatars',
+      userId,
+    );
+    const previousPublicId = user.avatarPublicId || null;
+
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      avatarUrl: uploaded.url,
+      avatarPublicId: uploaded.publicId,
+      updatedAt: new Date().toISOString(),
+    });
+
+    if (previousPublicId && previousPublicId !== uploaded.publicId) {
+      await this.cloudinaryService.deleteImage(previousPublicId);
+    }
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'users.avatar.update',
+      resource: 'users',
+      resourceId: userId,
+      outcome: 'ALLOW',
+    });
+
+    return {
+      id: user.id,
+      name: user.name,
+      maskedEmail: maskEmail(user.email),
+      maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
+      maskedPhone: maskPhone(user.phone),
+      hasCpf: Boolean(user.cpf),
+      avatarUrl: uploaded.url,
+    };
+  }
+
+  async removeAvatar(userId: string) {
+    const user = await this.findById(userId);
+    if (!user || user.isActive === false) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+
+    const previousPublicId = user.avatarPublicId || null;
+
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      avatarUrl: null,
+      avatarPublicId: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    if (previousPublicId) {
+      await this.cloudinaryService?.deleteImage(previousPublicId);
+    }
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'users.avatar.delete',
+      resource: 'users',
+      resourceId: userId,
+      outcome: 'ALLOW',
+    });
+
+    return {
+      id: user.id,
+      name: user.name,
+      maskedEmail: maskEmail(user.email),
+      maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
+      maskedPhone: maskPhone(user.phone),
+      hasCpf: Boolean(user.cpf),
+      avatarUrl: null,
+    };
+  }
+
+  async revokeUserTokens(userId: string): Promise<void> {
+    const user = await this.findById(userId);
+    if (!user) return;
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      tokenVersion: (user.tokenVersion ?? 1) + 1,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async findByCpf(rawCpf: string): Promise<UserDoc | null> {
@@ -271,11 +409,19 @@ export class UsersService {
           });
         } catch (error) {
           this.logger.warn(
-            `Não foi possível sincronizar atualização com Firebase Auth: ${error instanceof Error ? error.message : String(error)}`,
+            `Não foi possível sincronizar atualização com Firebase Auth: ${error instanceof Error ? redactSensitiveText(error.message) : 'erro desconhecido'}`,
           );
         }
       }
     }
+
+    void this.auditService?.log({
+      actorUserId: user.id,
+      action: 'users.profile.update',
+      resource: 'users',
+      resourceId: user.id,
+      outcome: 'ALLOW',
+    });
 
     return updated;
   }
@@ -306,9 +452,7 @@ export class UsersService {
       }
     }
 
-    const cpfLockId = createHash('sha256')
-      .update(userCpf.trim().toLowerCase())
-      .digest('hex');
+    const cpfLockId = computeBlindIndex('lock:cpf', userCpf);
     const cpfLock = await this.firebase.findById<{ userId: string }>(
       COLLECTIONS.CPF_LOCKS,
       cpfLockId,
@@ -448,6 +592,14 @@ export class UsersService {
       `export:${user.id}:${userCpf}`,
     );
 
+    void this.auditService?.log({
+      actorUserId: user.id,
+      action: 'users.data.export',
+      resource: 'users',
+      resourceId: user.id,
+      outcome: 'ALLOW',
+    });
+
     return {
       exportedAt: new Date().toISOString(),
       application: 'Finanças',
@@ -516,9 +668,18 @@ export class UsersService {
 
     await this.firebase.updateDoc(COLLECTIONS.USERS, user.id, {
       isActive: false,
+      tokenVersion: (user.tokenVersion ?? 1) + 1,
       deactivatedAt: now.toISOString(),
       deactivatedAtMs,
       updatedAt: now.toISOString(),
+    });
+
+    void this.auditService?.log({
+      actorUserId: user.id,
+      action: 'users.account.deactivate',
+      resource: 'users',
+      resourceId: user.id,
+      outcome: 'ALLOW',
     });
 
     return {
@@ -546,6 +707,7 @@ export class UsersService {
     const [
       expenses,
       incomes,
+      investments,
       accountTypes,
       memberships,
       sentInvites,
@@ -557,6 +719,11 @@ export class UsersService {
         userId,
       ),
       this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
+      this.firebase.findByField<InvestmentDoc>(
+        COLLECTIONS.INVESTMENTS,
+        'userId',
+        userId,
+      ),
       this.firebase.findByField<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
         'userId',
@@ -583,12 +750,28 @@ export class UsersService {
       new Set(memberships.map((m) => m.familyGroupId).filter(Boolean)),
     );
 
+    const cloudinaryAssetsToRemove = [
+      user.avatarPublicId,
+      ...expenses.map((doc) => doc.receiptPublicId),
+    ].filter((pubId): pubId is string => Boolean(pubId));
+
+    if (this.cloudinaryService && cloudinaryAssetsToRemove.length > 0) {
+      await Promise.allSettled(
+        cloudinaryAssetsToRemove.map((pubId) =>
+          this.cloudinaryService!.deleteImage(pubId),
+        ),
+      );
+    }
+
     await Promise.all([
       ...expenses.map((doc) =>
         this.firebase.deleteDoc(COLLECTIONS.EXPENSES, doc.id),
       ),
       ...incomes.map((doc) =>
         this.firebase.deleteDoc(COLLECTIONS.INCOME, doc.id),
+      ),
+      ...investments.map((doc) =>
+        this.firebase.deleteDoc(COLLECTIONS.INVESTMENTS, doc.id),
       ),
       ...accountTypes.map((doc) =>
         this.firebase.deleteDoc(COLLECTIONS.ACCOUNT_TYPES, doc.id),
@@ -620,6 +803,13 @@ export class UsersService {
     if (uid) {
       await this.firebase.deleteFirebaseUser(uid);
     }
+
+    await this.auditService?.log({
+      actorUserId: computeBlindIndex('audit:deleted', userId).slice(0, 24),
+      action: 'users.account.delete',
+      resource: 'users',
+      outcome: 'ALLOW',
+    });
 
     return {
       message:

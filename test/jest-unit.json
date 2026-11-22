@@ -2,6 +2,7 @@
   "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": "..",
   "roots": ["<rootDir>/test"],
+  "setupFiles": ["<rootDir>/test/jest-setup.ts"],
   "testMatch": ["<rootDir>/test/**/*.spec.ts"],
   "testPathIgnorePatterns": ["\\.component\\.spec\\.ts$", "\\.e2e-spec\\.ts$"],
   "transform": {

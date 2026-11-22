@@ -1,10 +1,12 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post, Request, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import type { AuthenticatedRequest } from './auth.types';
 import { FirebaseRegisterDto } from './dto/firebase-register.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { GoogleCompleteDto } from './dto/google-complete.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -41,5 +43,11 @@ export class AuthController {
       dto.identifier,
       dto.mode || 'reset',
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('logout')
+  async logout(@Request() req: AuthenticatedRequest) {
+    return this.authService.logout(req.user.userId);
   }
 }

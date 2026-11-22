@@ -4,9 +4,15 @@ export interface UserDoc {
   email: string;
   cpf: string | null;
   phone: string | null;
+  avatarUrl?: string | null;
+  avatarPublicId?: string | null;
   firebaseUid: string | null;
   authProvider: 'password' | 'google';
   isActive: boolean;
+  tokenVersion?: number;
+  emailIndex?: string | null;
+  cpfIndex?: string | null;
+  encryptionKeyVersion?: string;
   deactivatedAt: string | null;
   deactivatedAtMs: number | null;
   emergencyFund: number;
@@ -43,6 +49,8 @@ export interface ExpenseDoc {
   isPaid: boolean;
   isCreditCard: boolean;
   paymentMethod: string | null;
+  receiptUrl?: string | null;
+  receiptPublicId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -118,6 +126,30 @@ export interface FamilyInviteDoc {
   updatedAt: string;
 }
 
+export interface AuditLogDoc {
+  id: string;
+  actorUserId: string;
+  action: string;
+  resource: string;
+  resourceId: string | null;
+  outcome: 'ALLOW' | 'DENY' | 'ERROR';
+  httpMethod?: string | null;
+  path?: string | null;
+  statusCode?: number | null;
+  ipHash?: string | null;
+  details?: string | null;
+  createdAt: string;
+  expiresAtMs: number;
+}
+
+export interface RateLimitDoc {
+  id: string;
+  totalHits: number;
+  expiresAtMs: number;
+  blockedUntilMs: number;
+  updatedAtMs: number;
+}
+
 export const COLLECTIONS = {
   USERS: 'users',
   CPF_LOCKS: 'cpf_locks',
@@ -129,4 +161,6 @@ export const COLLECTIONS = {
   FAMILY_GROUPS: 'family_groups',
   FAMILY_MEMBERS: 'family_members',
   FAMILY_INVITES: 'family_invites',
+  AUDIT_LOGS: 'audit_logs',
+  RATE_LIMITS: 'rate_limits',
 } as const;

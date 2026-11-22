@@ -34,13 +34,13 @@ export class AppController {
         status: 'ok',
         database: 'connected',
         provider: 'firebase-firestore',
-        projectId: process.env.FIREBASE_PROJECT_ID || 'painel-monet',
+        environment:
+          typeof this.firebaseService.getActiveEnvironment === 'function'
+            ? this.firebaseService.getActiveEnvironment()
+            : 'production',
       };
-    } catch (error) {
-      this.logger.error(
-        'Falha ao verificar conexão com o Cloud Firestore',
-        error instanceof Error ? error.stack : String(error),
-      );
+    } catch {
+      this.logger.error('Falha ao verificar conexão com o Cloud Firestore');
       throw new ServiceUnavailableException({
         status: 'error',
         database: 'disconnected',

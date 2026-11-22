@@ -4,7 +4,7 @@ import {
   Logger,
   OnModuleInit,
 } from '@nestjs/common';
-import { createHash, createVerify } from 'crypto';
+import { createVerify } from 'crypto';
 import {
   cert,
   Credential,
@@ -19,14 +19,20 @@ import {
 } from 'firebase-admin/firestore';
 import * as fs from 'fs';
 import * as path from 'path';
+import { normalizeCpf } from '../common/cpf.utils';
 import {
+  computeBlindIndex,
+  computeUserBlindIndexes,
   decryptDocumentFromStorage,
   encryptDocumentForStorage,
-  encryptFieldValue,
+  getEncryptedFieldNames,
+  hasEncryptedCollectionFields,
   hasUnencryptedSensitiveFields,
   isEncryptedCollectionField,
+  resolveDocumentOwnerId,
+  validateEncryptionKeyConfig,
 } from '../common/data-crypto.utils';
-import { COLLECTIONS, UserDoc } from './firebase.types';
+import { COLLECTIONS, RateLimitDoc, UserDoc } from './firebase.types';
 
 export interface VerifiedFirebaseToken {
   uid: string;
@@ -48,13 +54,25 @@ export interface FirebaseAuthAccountInfo {
 
 const GOOGLE_CERTS_URL =
   'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+const PROD_FIREBASE_PROJECT_ID = 'painel-monet';
+const DEV_FIREBASE_PROJECT_ID = 'painel-monet-dev';
+const DEV_FIREBASE_WEB_API_KEY_DEFAULT =
+  'AIzaSyCp7epNvGqDH5TGCVEAW8_-3D-U_mV70u0';
+
+export function resolveActiveFirebaseEnvironment(): 'development' | 'production' {
+  const raw = (process.env.FIREBASE_ENV || '').trim().toLowerCase();
+  if (raw === 'development' || raw === 'dev') {
+    return 'development';
+  }
+  return 'production';
+}
 
 @Injectable()
 export class FirebaseService implements OnModuleInit {
   private readonly logger = new Logger(FirebaseService.name);
   private firestoreInstance: Firestore | null = null;
   private credentialInstance: Credential | null = null;
-  private resolvedProjectId = 'painel-monet';
+  private resolvedProjectId = PROD_FIREBASE_PROJECT_ID;
   private cachedCerts: {
     certs: Record<string, string>;
     expiresAt: number;
@@ -62,41 +80,122 @@ export class FirebaseService implements OnModuleInit {
   private cachedAdminToken: { token: string; expiresAt: number } | null = null;
 
   onModuleInit(): void {
+    validateEncryptionKeyConfig();
     this.ensureInitialized();
   }
 
+  getActiveEnvironment(): 'development' | 'production' {
+    return resolveActiveFirebaseEnvironment();
+  }
+
+  getResolvedProjectId(): string {
+    return this.resolvedProjectId;
+  }
+
+  private extractProjectIdFromAccount(sa: ServiceAccount): string {
+    return (
+      sa.projectId ||
+      (sa as Record<string, string | undefined>).project_id ||
+      ''
+    ).trim();
+  }
+
+  private parseServiceAccountJsonEnv(jsonEnv: string): ServiceAccount {
+    const rawJson = jsonEnv.startsWith('{')
+      ? jsonEnv
+      : Buffer.from(jsonEnv, 'base64').toString('utf8');
+    const parsed = JSON.parse(rawJson) as ServiceAccount & {
+      private_key?: string;
+    };
+    if (parsed.private_key) {
+      parsed.private_key = String(parsed.private_key)
+        .replace(/\r\n/g, '\n')
+        .replace(/\\n/g, '\n');
+    }
+    return parsed;
+  }
+
+  private loadServiceAccountFile(filePath: string): ServiceAccount {
+    const resolvedPath = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(process.cwd(), filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(
+        `Arquivo de Service Account não encontrado em: ${resolvedPath}`,
+      );
+    }
+    const parsed = JSON.parse(
+      fs.readFileSync(resolvedPath, 'utf8'),
+    ) as ServiceAccount & { private_key?: string };
+    if (parsed.private_key) {
+      parsed.private_key = String(parsed.private_key)
+        .replace(/\r\n/g, '\n')
+        .replace(/\\n/g, '\n');
+    }
+    return parsed;
+  }
+
   private loadServiceAccount(): ServiceAccount {
+    const activeEnv = resolveActiveFirebaseEnvironment();
+
+    if (activeEnv === 'development') {
+      const devJsonEnv = process.env.FIREBASE_DEV_SERVICE_ACCOUNT_JSON?.trim();
+      if (devJsonEnv) {
+        return this.parseServiceAccountJsonEnv(devJsonEnv);
+      }
+
+      const devPathEnv = process.env.FIREBASE_DEV_SERVICE_ACCOUNT_PATH?.trim();
+      if (devPathEnv) {
+        return this.loadServiceAccountFile(devPathEnv);
+      }
+
+      const devProjectId =
+        process.env.FIREBASE_DEV_PROJECT_ID?.trim() || DEV_FIREBASE_PROJECT_ID;
+      const devClientEmail = process.env.FIREBASE_DEV_CLIENT_EMAIL?.trim();
+      const devPrivateKeyRaw = process.env.FIREBASE_DEV_PRIVATE_KEY?.trim();
+
+      if (devProjectId && devClientEmail && devPrivateKeyRaw) {
+        return {
+          projectId: devProjectId,
+          clientEmail: devClientEmail,
+          privateKey: devPrivateKeyRaw
+            .replace(/^["']|["']$/g, '')
+            .replace(/\r\n/g, '\n')
+            .replace(/\\n/g, '\n'),
+        };
+      }
+
+      try {
+        const cwd = process.cwd();
+        const autoDevJson = fs
+          .readdirSync(cwd)
+          .find(
+            (file) =>
+              file === 'firebase-service-account.dev.json' ||
+              /painel-monet-dev.*firebase-adminsdk.*\.json$/i.test(file),
+          );
+        if (autoDevJson) {
+          return this.loadServiceAccountFile(path.join(cwd, autoDevJson));
+        }
+      } catch {
+        this.logger.debug(
+          'Nenhum arquivo local de credenciais DEV encontrado no diretório atual.',
+        );
+      }
+
+      throw new Error(
+        `[SECURITY] FIREBASE_ENV=development ativo, mas credenciais Admin do projeto '${devProjectId}' não foram configuradas. Defina FIREBASE_DEV_SERVICE_ACCOUNT_PATH=./firebase-service-account.dev.json, FIREBASE_DEV_SERVICE_ACCOUNT_JSON ou (FIREBASE_DEV_PROJECT_ID + FIREBASE_DEV_CLIENT_EMAIL + FIREBASE_DEV_PRIVATE_KEY) para não acessar o banco de produção por engano.`,
+      );
+    }
+
     const jsonEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
     if (jsonEnv) {
-      const rawJson = jsonEnv.startsWith('{')
-        ? jsonEnv
-        : Buffer.from(jsonEnv, 'base64').toString('utf8');
-      const parsed = JSON.parse(rawJson);
-      if (parsed.private_key) {
-        parsed.private_key = String(parsed.private_key)
-          .replace(/\r\n/g, '\n')
-          .replace(/\\n/g, '\n');
-      }
-      return parsed;
+      return this.parseServiceAccountJsonEnv(jsonEnv);
     }
 
     const filePathEnv = process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim();
     if (filePathEnv) {
-      const resolvedPath = path.isAbsolute(filePathEnv)
-        ? filePathEnv
-        : path.resolve(process.cwd(), filePathEnv);
-      if (!fs.existsSync(resolvedPath)) {
-        throw new Error(
-          `Arquivo de Service Account não encontrado em: ${resolvedPath}`,
-        );
-      }
-      const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
-      if (parsed.private_key) {
-        parsed.private_key = String(parsed.private_key)
-          .replace(/\r\n/g, '\n')
-          .replace(/\\n/g, '\n');
-      }
-      return parsed;
+      return this.loadServiceAccountFile(filePathEnv);
     }
 
     const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
@@ -123,17 +222,11 @@ export class FirebaseService implements OnModuleInit {
         .find(
           (file) =>
             file === 'firebase-service-account.json' ||
-            /firebase-adminsdk.*\.json$/i.test(file),
+            (/firebase-adminsdk.*\.json$/i.test(file) &&
+              !/painel-monet-dev/i.test(file)),
         );
       if (autoJsonFile) {
-        const fullPath = path.join(cwd, autoJsonFile);
-        const parsed = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-        if (parsed.private_key) {
-          parsed.private_key = String(parsed.private_key)
-            .replace(/\r\n/g, '\n')
-            .replace(/\\n/g, '\n');
-        }
-        return parsed;
+        return this.loadServiceAccountFile(path.join(cwd, autoJsonFile));
       }
     } catch {
       this.logger.debug(
@@ -151,13 +244,34 @@ export class FirebaseService implements OnModuleInit {
       return this.firestoreInstance;
     }
 
+    const activeEnv = resolveActiveFirebaseEnvironment();
     const serviceAccount = this.loadServiceAccount();
+    const accountProjectId = this.extractProjectIdFromAccount(serviceAccount);
+
+    if (activeEnv === 'development') {
+      const expectedDevProject =
+        process.env.FIREBASE_DEV_PROJECT_ID?.trim() || DEV_FIREBASE_PROJECT_ID;
+      if (accountProjectId === PROD_FIREBASE_PROJECT_ID) {
+        throw new Error(
+          `[SECURITY] Bloqueio de segurança: FIREBASE_ENV=development tentou carregar credencial de produção ('${PROD_FIREBASE_PROJECT_ID}'). Configure a Service Account do projeto '${expectedDevProject}'.`,
+        );
+      }
+      this.resolvedProjectId = accountProjectId || expectedDevProject;
+    } else {
+      const explicitProdProject = process.env.FIREBASE_PROJECT_ID?.trim();
+      if (
+        accountProjectId === DEV_FIREBASE_PROJECT_ID &&
+        explicitProdProject !== DEV_FIREBASE_PROJECT_ID
+      ) {
+        throw new Error(
+          `[SECURITY] Bloqueio de segurança: FIREBASE_ENV=production carregou credencial de desenvolvimento ('${DEV_FIREBASE_PROJECT_ID}').`,
+        );
+      }
+      this.resolvedProjectId =
+        explicitProdProject || accountProjectId || PROD_FIREBASE_PROJECT_ID;
+    }
+
     this.credentialInstance = cert(serviceAccount);
-    this.resolvedProjectId =
-      process.env.FIREBASE_PROJECT_ID?.trim() ||
-      serviceAccount.projectId ||
-      (serviceAccount as Record<string, string | undefined>).project_id ||
-      'painel-monet';
 
     if (getApps().length === 0) {
       initializeApp({
@@ -165,7 +279,7 @@ export class FirebaseService implements OnModuleInit {
         projectId: this.resolvedProjectId,
       });
       this.logger.log(
-        `Firebase Admin inicializado para o projeto: ${this.resolvedProjectId}`,
+        `Firebase Admin inicializado [${activeEnv.toUpperCase()}] para o projeto: ${this.resolvedProjectId}`,
       );
     }
 
@@ -209,34 +323,25 @@ export class FirebaseService implements OnModuleInit {
     field: string,
     value: string | boolean | number,
   ): Promise<T[]> {
-    if (
-      isEncryptedCollectionField(collectionName, field) &&
-      (typeof value === 'string' || typeof value === 'number')
-    ) {
-      const encryptedVal = encryptFieldValue(collectionName, field, value);
-      const [encSnap, plainSnap] = await Promise.all([
-        this.collection(collectionName).where(field, '==', encryptedVal).get(),
-        this.collection(collectionName).where(field, '==', value).get(),
-      ]);
+    let queryField = field;
+    let queryValue: string | boolean | number = value;
 
-      const byId = new Map<string, Record<string, unknown>>();
-      encSnap.docs.forEach((doc) => {
-        const data = doc.data() as Record<string, unknown>;
-        byId.set(String(data.id || doc.id), data);
-      });
-      plainSnap.docs.forEach((doc) => {
-        const data = doc.data() as Record<string, unknown>;
-        this.migrateIfUnencrypted(collectionName, data);
-        byId.set(String(data.id || doc.id), data);
-      });
-
-      return Array.from(byId.values()).map(
-        (raw) => decryptDocumentFromStorage(collectionName, raw) as T,
+    if (collectionName === COLLECTIONS.USERS && field === 'email' && typeof value === 'string') {
+      queryField = 'emailIndex';
+      queryValue = computeBlindIndex('user:email', value.trim().toLowerCase());
+    } else if (collectionName === COLLECTIONS.USERS && field === 'cpf' && typeof value === 'string') {
+      const normalized = normalizeCpf(value);
+      if (!normalized) return [];
+      queryField = 'cpfIndex';
+      queryValue = computeBlindIndex('user:cpf', normalized);
+    } else if (isEncryptedCollectionField(collectionName, field)) {
+      throw new Error(
+        `[SECURITY] Consulta direta não permitida em campo criptografado (${collectionName}.${field}). Utilize índice cego HMAC.`,
       );
     }
 
     const snap = await this.collection(collectionName)
-      .where(field, '==', value)
+      .where(queryField, '==', queryValue)
       .get();
     return snap.docs.map((doc) => {
       const raw = doc.data() as Record<string, unknown>;
@@ -250,23 +355,25 @@ export class FirebaseService implements OnModuleInit {
     field: string,
     value: string | boolean | number,
   ): Promise<T | null> {
-    if (
-      isEncryptedCollectionField(collectionName, field) &&
-      (typeof value === 'string' || typeof value === 'number')
-    ) {
-      const encryptedVal = encryptFieldValue(collectionName, field, value);
-      const encSnap = await this.collection(collectionName)
-        .where(field, '==', encryptedVal)
-        .limit(1)
-        .get();
-      if (!encSnap.empty) {
-        const raw = encSnap.docs[0].data() as Record<string, unknown>;
-        return decryptDocumentFromStorage(collectionName, raw) as T;
-      }
+    let queryField = field;
+    let queryValue: string | boolean | number = value;
+
+    if (collectionName === COLLECTIONS.USERS && field === 'email' && typeof value === 'string') {
+      queryField = 'emailIndex';
+      queryValue = computeBlindIndex('user:email', value.trim().toLowerCase());
+    } else if (collectionName === COLLECTIONS.USERS && field === 'cpf' && typeof value === 'string') {
+      const normalized = normalizeCpf(value);
+      if (!normalized) return null;
+      queryField = 'cpfIndex';
+      queryValue = computeBlindIndex('user:cpf', normalized);
+    } else if (isEncryptedCollectionField(collectionName, field)) {
+      throw new Error(
+        `[SECURITY] Consulta direta não permitida em campo criptografado (${collectionName}.${field}). Utilize índice cego HMAC.`,
+      );
     }
 
     const snap = await this.collection(collectionName)
-      .where(field, '==', value)
+      .where(queryField, '==', queryValue)
       .limit(1)
       .get();
     if (snap.empty) return null;
@@ -318,23 +425,119 @@ export class FirebaseService implements OnModuleInit {
     id: string,
     data: Record<string, unknown>,
   ): Promise<void> {
-    const encryptedData: Record<string, unknown> = encryptDocumentForStorage(
-      collectionName,
-      {
+    const docRef = this.collection(collectionName).doc(id);
+    const encFields = getEncryptedFieldNames(collectionName);
+    const touchesEncrypted =
+      hasEncryptedCollectionFields(collectionName) &&
+      Object.keys(data).some((key) => encFields.includes(key));
+
+    let payloadToWrite: Record<string, unknown> = { ...data };
+
+    if (touchesEncrypted) {
+      let ownerId = resolveDocumentOwnerId(collectionName, {
         ...data,
         id,
-      },
-    );
-    delete encryptedData.id;
-    await this.collection(collectionName).doc(id).update(encryptedData);
+      });
+
+      if (
+        collectionName !== COLLECTIONS.USERS &&
+        (!data.userId && !(collectionName === COLLECTIONS.FAMILY_INVITES && data.familyGroupId))
+      ) {
+        const snap = await docRef.get();
+        if (!snap.exists) {
+          throw new Error(
+            `[SECURITY] Documento alvo não encontrado para atualização criptografada (${collectionName}/${id}).`,
+          );
+        }
+        const existingData = snap.data() as Record<string, unknown>;
+        ownerId = resolveDocumentOwnerId(collectionName, {
+          ...existingData,
+          id,
+        });
+      }
+
+      if (collectionName === COLLECTIONS.USERS) {
+        const indexes = computeUserBlindIndexes({
+          email: data.email,
+          cpf: data.cpf,
+        });
+        Object.assign(payloadToWrite, indexes);
+      }
+
+      const encryptedUpdate = encryptDocumentForStorage(
+        collectionName,
+        { ...payloadToWrite, id },
+        { recordId: id, ownerId },
+      );
+      delete (encryptedUpdate as Record<string, unknown>).id;
+      payloadToWrite = encryptedUpdate;
+    }
+
+    await docRef.update(payloadToWrite);
   }
 
   async deleteDoc(collectionName: string, id: string): Promise<void> {
     await this.collection(collectionName).doc(id).delete();
   }
 
-  private lockKey(value: string): string {
-    return createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
+  private lockKey(namespace: 'lock:email' | 'lock:cpf', value: string): string {
+    return computeBlindIndex(namespace, value);
+  }
+
+  async incrementRateLimit(
+    docId: string,
+    ttl: number,
+    limit: number,
+    blockDuration: number,
+    now: number,
+  ): Promise<{
+    totalHits: number;
+    timeToExpire: number;
+    isBlocked: boolean;
+    timeToBlockExpire: number;
+  }> {
+    const ref = this.db.collection(COLLECTIONS.RATE_LIMITS).doc(docId);
+
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const existing = snap.exists ? (snap.data() as RateLimitDoc) : null;
+
+      if (existing && existing.blockedUntilMs > now) {
+        return {
+          totalHits: existing.totalHits,
+          timeToExpire: Math.max(0, existing.expiresAtMs - now),
+          isBlocked: true,
+          timeToBlockExpire: Math.max(0, existing.blockedUntilMs - now),
+        };
+      }
+
+      const expired = !existing || existing.expiresAtMs <= now;
+      const totalHits = expired ? 1 : existing.totalHits + 1;
+      const expiresAtMs = expired ? now + ttl : existing.expiresAtMs;
+      let blockedUntilMs = expired ? 0 : existing.blockedUntilMs;
+      let isBlocked = false;
+
+      if (totalHits > limit) {
+        isBlocked = true;
+        blockedUntilMs = now + (blockDuration > 0 ? blockDuration : ttl);
+      }
+
+      const nextDoc: RateLimitDoc = {
+        id: docId,
+        totalHits,
+        expiresAtMs,
+        blockedUntilMs,
+        updatedAtMs: now,
+      };
+      tx.set(ref, nextDoc);
+
+      return {
+        totalHits,
+        timeToExpire: Math.max(0, expiresAtMs - now),
+        isBlocked,
+        timeToBlockExpire: isBlocked ? Math.max(0, blockedUntilMs - now) : 0,
+      };
+    });
   }
 
   private decodeBase64UrlJson<T>(segment: string): T {
@@ -434,8 +637,7 @@ export class FirebaseService implements OnModuleInit {
       firebase?: { sign_in_provider?: string };
     }>(encodedPayload);
 
-    const projectId =
-      process.env.FIREBASE_PROJECT_ID?.trim() || this.resolvedProjectId;
+    const projectId = this.resolvedProjectId;
     const nowSec = Math.floor(Date.now() / 1000);
 
     if (payload.aud !== projectId) {
@@ -444,14 +646,17 @@ export class FirebaseService implements OnModuleInit {
     if (payload.iss !== `https://securetoken.google.com/${projectId}`) {
       throw new Error('Emissor do token Firebase inválido');
     }
-    if (!payload.sub || typeof payload.sub !== 'string') {
-      throw new Error('Identificador de usuário ausente no token');
+    if (!payload.sub || typeof payload.sub !== 'string' || payload.sub.length > 128) {
+      throw new Error('Identificador de usuário inválido no token');
     }
     if (!payload.exp || payload.exp <= nowSec) {
       throw new Error('Token Firebase expirado');
     }
     if (payload.iat && payload.iat > nowSec + 300) {
       throw new Error('Token Firebase com data de emissão futura inválida');
+    }
+    if (payload.auth_time && payload.auth_time > nowSec + 300) {
+      throw new Error('Token Firebase com horário de autenticação inválido');
     }
 
     return {
@@ -569,10 +774,17 @@ export class FirebaseService implements OnModuleInit {
     email: string,
     continueUrl?: string,
   ): Promise<void> {
-    const webApiKey = process.env.FIREBASE_WEB_API_KEY?.trim();
+    const activeEnv = resolveActiveFirebaseEnvironment();
+    const webApiKey =
+      activeEnv === 'development'
+        ? process.env.FIREBASE_DEV_WEB_API_KEY?.trim() ||
+          DEV_FIREBASE_WEB_API_KEY_DEFAULT
+        : process.env.FIREBASE_WEB_API_KEY?.trim();
     if (!webApiKey) {
       throw new Error(
-        'FIREBASE_WEB_API_KEY não configurada no backend para envio de e-mail pelo Firebase.',
+        activeEnv === 'development'
+          ? 'FIREBASE_DEV_WEB_API_KEY não configurada no backend para envio de e-mail em desenvolvimento.'
+          : 'FIREBASE_WEB_API_KEY não configurada no backend para envio de e-mail pelo Firebase.',
       );
     }
 
@@ -649,9 +861,11 @@ export class FirebaseService implements OnModuleInit {
     const db = this.db;
     const emailLockRef = db
       .collection(COLLECTIONS.EMAIL_LOCKS)
-      .doc(this.lockKey(user.email));
+      .doc(this.lockKey('lock:email', user.email));
     const cpfLockRef = user.cpf
-      ? db.collection(COLLECTIONS.CPF_LOCKS).doc(this.lockKey(user.cpf))
+      ? db
+          .collection(COLLECTIONS.CPF_LOCKS)
+          .doc(this.lockKey('lock:cpf', user.cpf))
       : null;
     const userRef = db.collection(COLLECTIONS.USERS).doc(user.id);
 
@@ -679,9 +893,14 @@ export class FirebaseService implements OnModuleInit {
       if (cpfLockRef) {
         tx.set(cpfLockRef, { userId: user.id, updatedAt: now });
       }
+      const userWithIndexes: Record<string, unknown> = {
+        ...user,
+        ...computeUserBlindIndexes({ email: user.email, cpf: user.cpf }),
+      };
       const encryptedUser = encryptDocumentForStorage(
         COLLECTIONS.USERS,
-        user as unknown as Record<string, unknown>,
+        userWithIndexes,
+        { recordId: user.id, ownerId: user.id },
       );
       tx.set(userRef, encryptedUser);
     });
@@ -706,20 +925,24 @@ export class FirebaseService implements OnModuleInit {
     const oldEmailLockRef = emailChanged
       ? db
           .collection(COLLECTIONS.EMAIL_LOCKS)
-          .doc(this.lockKey(currentUser.email))
+          .doc(this.lockKey('lock:email', currentUser.email))
       : null;
     const newEmailLockRef = emailChanged
-      ? db.collection(COLLECTIONS.EMAIL_LOCKS).doc(this.lockKey(nextEmail))
+      ? db
+          .collection(COLLECTIONS.EMAIL_LOCKS)
+          .doc(this.lockKey('lock:email', nextEmail))
       : null;
     const oldCpfLockRef =
       cpfChanged && currentUser.cpf
         ? db
             .collection(COLLECTIONS.CPF_LOCKS)
-            .doc(this.lockKey(currentUser.cpf))
+            .doc(this.lockKey('lock:cpf', currentUser.cpf))
         : null;
     const newCpfLockRef =
       cpfChanged && nextCpf
-        ? db.collection(COLLECTIONS.CPF_LOCKS).doc(this.lockKey(nextCpf))
+        ? db
+            .collection(COLLECTIONS.CPF_LOCKS)
+            .doc(this.lockKey('lock:cpf', nextCpf))
         : null;
 
     await db.runTransaction(async (tx) => {
@@ -756,12 +979,19 @@ export class FirebaseService implements OnModuleInit {
       if (newCpfLockRef) {
         tx.set(newCpfLockRef, { userId, updatedAt: now });
       }
+
+      const updateWithIndexes: Record<string, unknown> = {
+        ...updateData,
+        ...computeUserBlindIndexes({
+          email: nextEmail,
+          cpf: nextCpf,
+        }),
+        id: userId,
+      };
       const encryptedUpdate: Record<string, unknown> = encryptDocumentForStorage(
         COLLECTIONS.USERS,
-        {
-          ...updateData,
-          id: userId,
-        } as Record<string, unknown>,
+        updateWithIndexes,
+        { recordId: userId, ownerId: userId },
       );
       delete encryptedUpdate.id;
       tx.update(userRef, encryptedUpdate);
@@ -775,9 +1005,11 @@ export class FirebaseService implements OnModuleInit {
     const userRef = db.collection(COLLECTIONS.USERS).doc(user.id);
     const emailLockRef = db
       .collection(COLLECTIONS.EMAIL_LOCKS)
-      .doc(this.lockKey(user.email));
+      .doc(this.lockKey('lock:email', user.email));
     const cpfLockRef = user.cpf
-      ? db.collection(COLLECTIONS.CPF_LOCKS).doc(this.lockKey(user.cpf))
+      ? db
+          .collection(COLLECTIONS.CPF_LOCKS)
+          .doc(this.lockKey('lock:cpf', user.cpf))
       : null;
 
     await db.runTransaction(async (tx) => {

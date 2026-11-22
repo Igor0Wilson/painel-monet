@@ -2,9 +2,12 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
+import { AuditService } from '../common/audit.service';
+import { maskPhone } from '../common/cpf.utils';
 import {
   FamilyService,
   FULL_MEMBER_PERMISSIONS,
@@ -41,6 +44,7 @@ export class BalanceService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly familyService: FamilyService,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   private computeCashAndIncome(
@@ -292,11 +296,15 @@ export class BalanceService {
         };
 
         const info = authScope.userMap.get(u.id);
+        const allowFullContact =
+          u.id === userId || Object.values(permissions).every(Boolean);
         return {
           userId: u.id,
           name: u.name,
           maskedCpf: info?.maskedCpf || '***.***.***-**',
-          phone: u.phone || null,
+          maskedPhone: maskPhone(u.phone),
+          phone: allowFullContact ? u.phone || null : null,
+          avatarUrl: u.avatarUrl || null,
           isSelf: u.id === userId,
           permissions,
           ...metrics,
@@ -626,6 +634,14 @@ export class BalanceService {
     await this.syncUserInvestmentTotalsFromItems(userId);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'investments.create',
+      resource: 'investments',
+      resourceId: doc.id,
+      outcome: 'ALLOW',
+    });
+
     return doc;
   }
 
@@ -695,6 +711,13 @@ export class BalanceService {
     await this.firebase.deleteDoc(COLLECTIONS.INVESTMENTS, itemId);
     await this.syncUserInvestmentTotalsFromItems(userId);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'investments.delete',
+      resource: 'investments',
+      resourceId: itemId,
+      outcome: 'ALLOW',
+    });
   }
 
   private async updateSavingsBucket(params: {

@@ -7,23 +7,34 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { BalanceModule } from './balance/balance.module';
+import { CryptoModule } from './common/crypto.module';
+import { FirestoreThrottlerStorage } from './common/firestore-throttler.storage';
 import { ExpensesModule } from './expenses/expenses.module';
 import { FamilyModule } from './family/family.module';
 import { FirebaseModule } from './firebase/firebase.module';
+import { FirebaseService } from './firebase/firebase.service';
 import { IncomeModule } from './income/income.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    ThrottlerModule.forRoot([
-      {
-        name: 'default',
-        ttl: 60000,
-        limit: 60,
-      },
-    ]),
+    CryptoModule,
     FirebaseModule,
+    ThrottlerModule.forRootAsync({
+      imports: [FirebaseModule],
+      inject: [FirebaseService],
+      useFactory: (firebase: FirebaseService) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: 60000,
+            limit: 60,
+          },
+        ],
+        storage: new FirestoreThrottlerStorage(firebase),
+      }),
+    }),
     AuthModule,
     UsersModule,
     AccountTypesModule,
@@ -41,4 +52,4 @@ import { UsersModule } from './users/users.module';
     },
   ],
 })
-export class AppModule {}
+export class AppModule { }

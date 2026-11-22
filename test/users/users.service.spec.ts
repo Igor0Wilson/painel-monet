@@ -146,6 +146,15 @@ describe('UsersService (Firebase Auth + Firestore)', () => {
       name: 'Salario',
       value: 5000,
     });
+    await firebase.setDoc(COLLECTIONS.INVESTMENTS, {
+      id: 'inv-1',
+      userId: user.id,
+      name: 'Tesouro Selic',
+      category: 'Renda Fixa',
+      amount: 12000,
+      investedDate: '2026-10-01',
+      source: 'external',
+    });
 
     await expect(
       service.deleteAccountPermanently(user.id, true, 'ERRADO'),
@@ -155,6 +164,7 @@ describe('UsersService (Firebase Auth + Firestore)', () => {
 
     expect(await service.findById(user.id)).toBeNull();
     expect(await firebase.findById(COLLECTIONS.INCOME, 'inc-1')).toBeNull();
+    expect(await firebase.findById(COLLECTIONS.INVESTMENTS, 'inv-1')).toBeNull();
     expect(firebase.deletedFirebaseUids).toContain('fb-7');
 
     const recreated = await service.createFromFirebase({

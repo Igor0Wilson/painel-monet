@@ -6,10 +6,10 @@ import { UsersService } from '../../users/users.service';
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(private readonly usersService: UsersService) {
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
+    const secret = process.env.JWT_SECRET?.trim() || '';
+    if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
       throw new Error(
-        '[SECURITY] JWT_SECRET não está definido nas variáveis de ambiente.',
+        '[SECURITY] JWT_SECRET ausente, fraca ou padrão nas variáveis de ambiente.',
       );
     }
     super({
@@ -20,7 +20,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { userId?: string; email?: string }) {
+  async validate(payload: { userId?: string; tv?: number; email?: string }) {
     if (!payload?.userId) {
       throw new UnauthorizedException('Sessão inválida');
     }
@@ -30,6 +30,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Conta inativa ou removida');
     }
 
-    return { userId: user.id, email: user.email };
+    const currentVersion = user.tokenVersion ?? 1;
+    const tokenVersion = payload.tv ?? 1;
+    if (tokenVersion !== currentVersion) {
+      throw new UnauthorizedException(
+        'Sessão revogada. Faça login novamente para continuar.',
+      );
+    }
+
+    return { userId: user.id };
   }
 }

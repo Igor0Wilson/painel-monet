@@ -13,11 +13,10 @@ import { UsersModule } from '../users/users.module';
     PassportModule,
     JwtModule.registerAsync({
       useFactory: () => {
-        const secret = process.env.JWT_SECRET;
-        if (!secret) {
+        const secret = process.env.JWT_SECRET?.trim() || '';
+        if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
           throw new Error(
-            '[SECURITY] JWT_SECRET não está definido nas variáveis de ambiente. ' +
-              'O servidor não pode iniciar sem um segredo JWT forte.',
+            '[SECURITY] JWT_SECRET ausente, fraca ou padrão nas variáveis de ambiente. Configure pelo menos 32 caracteres aleatórios.',
           );
         }
         return {

@@ -1,10 +1,17 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID as uuidv4 } from 'crypto';
 import { normalizeOfficialCategory } from '../account-types/account-types.service';
+import { AuditService } from '../common/audit.service';
+import {
+  CloudinaryService,
+  type UploadedImageFile,
+} from '../common/cloudinary.service';
 import { FamilyService } from '../family/family.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
@@ -50,6 +57,8 @@ export class ExpensesService {
   constructor(
     private readonly firebase: FirebaseService,
     private readonly familyService: FamilyService,
+    @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly cloudinaryService?: CloudinaryService,
   ) { }
 
   private calcularStatus(expense: ExpenseDoc): ExpenseStatus {
@@ -229,6 +238,11 @@ export class ExpensesService {
       COLLECTIONS.ACCOUNT_TYPES,
       dto.accountTypeId,
     );
+    if (accountType && accountType.userId !== userId) {
+      throw new ForbiddenException(
+        'Categoria não pertence ao usuário autenticado.',
+      );
+    }
     const isCardCategory =
       accountType?.userId === userId &&
       isCreditCardCategoryName(accountType?.name);
@@ -404,6 +418,14 @@ export class ExpensesService {
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.pay',
+      resource: 'expenses',
+      resourceId: expense.id,
+      outcome: 'ALLOW',
+    });
+
     return {
       ...expense,
       isPaid: true,
@@ -471,6 +493,14 @@ export class ExpensesService {
     }
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.pay_credit_card_invoice',
+      resource: 'expenses',
+      outcome: 'ALLOW',
+      details: `count=${paidIds.length}`,
+    });
 
     return {
       month: dto.month,
@@ -551,6 +581,14 @@ export class ExpensesService {
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.pay_batch',
+      resource: 'expenses',
+      outcome: 'ALLOW',
+      details: `count=${paidIds.length}`,
+    });
+
     return {
       paidCount: paidIds.length,
       totalPaid: Number(totalPaid.toFixed(2)),
@@ -575,12 +613,123 @@ export class ExpensesService {
     );
     for (const child of childExpenses) {
       if (child.userId === userId) {
+        if (child.receiptPublicId) {
+          await this.cloudinaryService?.deleteImage(child.receiptPublicId);
+        }
         await this.firebase.deleteDoc(COLLECTIONS.EXPENSES, child.id);
       }
     }
 
+    if (expense.receiptPublicId) {
+      await this.cloudinaryService?.deleteImage(expense.receiptPublicId);
+    }
+
     await this.firebase.deleteDoc(COLLECTIONS.EXPENSES, id);
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.delete',
+      resource: 'expenses',
+      resourceId: id,
+      outcome: 'ALLOW',
+    });
+  }
+
+  async uploadReceiptPhoto(
+    id: string,
+    userId: string,
+    file: UploadedImageFile,
+  ): Promise<ExpenseWithStatus> {
+    const expense = await this.firebase.findById<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      id,
+    );
+    if (!expense || expense.userId !== userId) {
+      throw new NotFoundException('Despesa não encontrada');
+    }
+    if (!this.cloudinaryService) {
+      throw new BadRequestException(
+        'Serviço de armazenamento de imagens indisponível.',
+      );
+    }
+
+    const uploaded = await this.cloudinaryService.uploadImage(
+      file,
+      'expenses',
+      userId,
+    );
+    const previousPublicId = expense.receiptPublicId || null;
+    const now = new Date().toISOString();
+
+    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+      receiptUrl: uploaded.url,
+      receiptPublicId: uploaded.publicId,
+      updatedAt: now,
+    });
+
+    if (previousPublicId && previousPublicId !== uploaded.publicId) {
+      await this.cloudinaryService.deleteImage(previousPublicId);
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.photo.update',
+      resource: 'expenses',
+      resourceId: id,
+      outcome: 'ALLOW',
+    });
+
+    const updated: ExpenseDoc = {
+      ...expense,
+      receiptUrl: uploaded.url,
+      receiptPublicId: uploaded.publicId,
+      updatedAt: now,
+    };
+    return { ...updated, status: this.calcularStatus(updated) };
+  }
+
+  async removeReceiptPhoto(
+    id: string,
+    userId: string,
+  ): Promise<ExpenseWithStatus> {
+    const expense = await this.firebase.findById<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      id,
+    );
+    if (!expense || expense.userId !== userId) {
+      throw new NotFoundException('Despesa não encontrada');
+    }
+
+    const previousPublicId = expense.receiptPublicId || null;
+    const now = new Date().toISOString();
+
+    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+      receiptUrl: null,
+      receiptPublicId: null,
+      updatedAt: now,
+    });
+
+    if (previousPublicId) {
+      await this.cloudinaryService?.deleteImage(previousPublicId);
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.photo.delete',
+      resource: 'expenses',
+      resourceId: id,
+      outcome: 'ALLOW',
+    });
+
+    const updated: ExpenseDoc = {
+      ...expense,
+      receiptUrl: null,
+      receiptPublicId: null,
+      updatedAt: now,
+    };
+    return { ...updated, status: this.calcularStatus(updated) };
   }
 
   async update(
@@ -601,6 +750,15 @@ export class ExpensesService {
     };
     if (dto.name !== undefined) updateData.name = dto.name.trim();
     if (dto.accountTypeId !== undefined) {
+      const targetCategory = await this.firebase.findById<AccountTypeDoc>(
+        COLLECTIONS.ACCOUNT_TYPES,
+        dto.accountTypeId,
+      );
+      if (targetCategory && targetCategory.userId !== userId) {
+        throw new ForbiddenException(
+          'Categoria não pertence ao usuário autenticado.',
+        );
+      }
       updateData.accountTypeId = dto.accountTypeId;
     }
     if (dto.value !== undefined) updateData.value = Number(dto.value);

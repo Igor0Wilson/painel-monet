@@ -8,10 +8,14 @@ import {
   Post,
   Query,
   Request,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import type { UploadedImageFile } from '../common/cloudinary.service';
 import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
@@ -71,5 +75,22 @@ export class ExpensesController {
     @Request() req: AuthenticatedRequest,
   ) {
     return this.service.update(id, dto, req.user.userId);
+  }
+
+  @Post(':id/photo')
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: 3 * 1024 * 1024 } }),
+  )
+  uploadPhoto(
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedImageFile,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.service.uploadReceiptPhoto(id, req.user.userId, file);
+  }
+
+  @Delete(':id/photo')
+  removePhoto(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
+    return this.service.removeReceiptPhoto(id, req.user.userId);
   }
 }

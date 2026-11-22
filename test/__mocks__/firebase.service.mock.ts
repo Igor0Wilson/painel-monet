@@ -1,5 +1,15 @@
 import { ConflictException } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { normalizeCpf } from '../../src/common/cpf.utils';
+import {
+  computeBlindIndex,
+  computeUserBlindIndexes,
+  decryptDocumentFromStorage,
+  encryptDocumentForStorage,
+  getEncryptedFieldNames,
+  hasEncryptedCollectionFields,
+  isEncryptedCollectionField,
+  resolveDocumentOwnerId,
+} from '../../src/common/data-crypto.utils';
 import {
   FirebaseAuthAccountInfo,
   VerifiedFirebaseToken,
@@ -24,14 +34,21 @@ export class InMemoryFirebaseService {
     return this.store.get(name)!;
   }
 
-  private lockKey(value: string): string {
-    return createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
+  /** Expõe cópia bruta para inspeção em testes de criptografia em repouso. */
+  getRawStoredDoc(collectionName: string, id: string): StoredDoc | null {
+    const raw = this.getCollection(collectionName).get(id);
+    return raw ? { ...raw } : null;
+  }
+
+  private lockKey(namespace: 'lock:email' | 'lock:cpf', value: string): string {
+    return computeBlindIndex(namespace, value);
   }
 
   async findById<T>(collectionName: string, id: string): Promise<T | null> {
     if (!id) return null;
     const item = this.getCollection(collectionName).get(id);
-    return item ? ({ ...item } as T) : null;
+    if (!item) return null;
+    return decryptDocumentFromStorage(collectionName, { ...item }) as T;
   }
 
   async findByField<T>(
@@ -39,10 +56,39 @@ export class InMemoryFirebaseService {
     field: string,
     value: string | boolean | number,
   ): Promise<T[]> {
+    let queryField = field;
+    let queryValue: string | boolean | number = value;
+
+    if (
+      collectionName === COLLECTIONS.USERS &&
+      field === 'email' &&
+      typeof value === 'string'
+    ) {
+      queryField = 'emailIndex';
+      queryValue = computeBlindIndex('user:email', value.trim().toLowerCase());
+    } else if (
+      collectionName === COLLECTIONS.USERS &&
+      field === 'cpf' &&
+      typeof value === 'string'
+    ) {
+      const normalized = normalizeCpf(value);
+      if (!normalized) return [];
+      queryField = 'cpfIndex';
+      queryValue = computeBlindIndex('user:cpf', normalized);
+    } else if (isEncryptedCollectionField(collectionName, field)) {
+      throw new Error(
+        `[SECURITY] Consulta direta não permitida em campo criptografado (${collectionName}.${field}).`,
+      );
+    }
+
     const col = this.getCollection(collectionName);
     const out: T[] = [];
     col.forEach((doc) => {
-      if (doc[field] === value) out.push({ ...doc } as T);
+      if (doc[queryField] === queryValue) {
+        out.push(
+          decryptDocumentFromStorage(collectionName, { ...doc }) as T,
+        );
+      }
     });
     return out;
   }
@@ -68,7 +114,7 @@ export class InMemoryFirebaseService {
     col.forEach((doc) => {
       const fieldVal = doc[field];
       if (typeof fieldVal === 'string' && set.has(fieldVal)) {
-        out.push({ ...doc } as T);
+        out.push(decryptDocumentFromStorage(collectionName, { ...doc }) as T);
       }
     });
     return out;
@@ -78,10 +124,16 @@ export class InMemoryFirebaseService {
     collectionName: string,
     doc: T,
   ): Promise<T> {
-    this.getCollection(collectionName).set(doc.id, {
-      ...(doc as unknown as StoredDoc),
-    });
-    return { ...doc };
+    const raw: StoredDoc = { ...(doc as unknown as StoredDoc) };
+    if (collectionName === COLLECTIONS.USERS) {
+      Object.assign(
+        raw,
+        computeUserBlindIndexes({ email: raw.email, cpf: raw.cpf }),
+      );
+    }
+    const encrypted = encryptDocumentForStorage(collectionName, raw);
+    this.getCollection(collectionName).set(doc.id, encrypted);
+    return decryptDocumentFromStorage(collectionName, encrypted) as T;
   }
 
   async updateDoc(
@@ -91,9 +143,36 @@ export class InMemoryFirebaseService {
   ): Promise<void> {
     const col = this.getCollection(collectionName);
     const existing = col.get(id);
-    if (existing) {
-      col.set(id, { ...existing, ...data });
+    if (!existing) return;
+
+    const encFields = getEncryptedFieldNames(collectionName);
+    const touchesEncrypted =
+      hasEncryptedCollectionFields(collectionName) &&
+      Object.keys(data).some((key) => encFields.includes(key));
+
+    let payloadToMerge: StoredDoc = { ...data };
+    if (touchesEncrypted) {
+      const ownerId = resolveDocumentOwnerId(collectionName, {
+        ...existing,
+        ...data,
+        id,
+      });
+      if (collectionName === COLLECTIONS.USERS) {
+        Object.assign(
+          payloadToMerge,
+          computeUserBlindIndexes({ email: data.email, cpf: data.cpf }),
+        );
+      }
+      const encrypted = encryptDocumentForStorage(
+        collectionName,
+        { ...payloadToMerge, id },
+        { recordId: id, ownerId },
+      );
+      delete encrypted.id;
+      payloadToMerge = encrypted;
     }
+
+    col.set(id, { ...existing, ...payloadToMerge });
   }
 
   async deleteDoc(collectionName: string, id: string): Promise<void> {
@@ -163,8 +242,8 @@ export class InMemoryFirebaseService {
   async createUserWithAtomicLocks(user: UserDoc): Promise<UserDoc> {
     const emailLocks = this.getCollection(COLLECTIONS.EMAIL_LOCKS);
     const cpfLocks = this.getCollection(COLLECTIONS.CPF_LOCKS);
-    const emailKey = this.lockKey(user.email);
-    const cpfKey = user.cpf ? this.lockKey(user.cpf) : null;
+    const emailKey = this.lockKey('lock:email', user.email);
+    const cpfKey = user.cpf ? this.lockKey('lock:cpf', user.cpf) : null;
 
     if (emailLocks.has(emailKey)) {
       throw new ConflictException({
@@ -183,7 +262,15 @@ export class InMemoryFirebaseService {
     if (cpfKey) {
       cpfLocks.set(cpfKey, { userId: user.id, updatedAt: user.updatedAt });
     }
-    this.getCollection(COLLECTIONS.USERS).set(user.id, { ...user });
+    const stored = encryptDocumentForStorage(
+      COLLECTIONS.USERS,
+      {
+        ...user,
+        ...computeUserBlindIndexes({ email: user.email, cpf: user.cpf }),
+      } as StoredDoc,
+      { recordId: user.id, ownerId: user.id },
+    );
+    this.getCollection(COLLECTIONS.USERS).set(user.id, stored);
     return { ...user };
   }
 
@@ -200,7 +287,7 @@ export class InMemoryFirebaseService {
       updateData.cpf !== undefined ? updateData.cpf : currentUser.cpf;
 
     if (nextEmail !== currentUser.email) {
-      const nextKey = this.lockKey(nextEmail);
+      const nextKey = this.lockKey('lock:email', nextEmail);
       const existing = emailLocks.get(nextKey);
       if (existing && existing.userId !== userId) {
         throw new ConflictException({
@@ -208,13 +295,13 @@ export class InMemoryFirebaseService {
           code: 'EMAIL_ALREADY_EXISTS',
         });
       }
-      emailLocks.delete(this.lockKey(currentUser.email));
+      emailLocks.delete(this.lockKey('lock:email', currentUser.email));
       emailLocks.set(nextKey, { userId, updatedAt: updateData.updatedAt });
     }
 
     if (nextCpf !== currentUser.cpf) {
       if (nextCpf) {
-        const nextCpfKey = this.lockKey(nextCpf);
+        const nextCpfKey = this.lockKey('lock:cpf', nextCpf);
         const existing = cpfLocks.get(nextCpfKey);
         if (existing && existing.userId !== userId) {
           throw new ConflictException({
@@ -223,24 +310,41 @@ export class InMemoryFirebaseService {
           });
         }
         if (currentUser.cpf) {
-          cpfLocks.delete(this.lockKey(currentUser.cpf));
+          cpfLocks.delete(this.lockKey('lock:cpf', currentUser.cpf));
         }
         cpfLocks.set(nextCpfKey, { userId, updatedAt: updateData.updatedAt });
       } else if (currentUser.cpf) {
-        cpfLocks.delete(this.lockKey(currentUser.cpf));
+        cpfLocks.delete(this.lockKey('lock:cpf', currentUser.cpf));
       }
     }
 
-    const merged = { ...currentUser, ...updateData };
-    this.getCollection(COLLECTIONS.USERS).set(userId, merged);
-    return { ...merged };
+    const rawExisting = this.getCollection(COLLECTIONS.USERS).get(userId) || {};
+    const encryptedUpdate = encryptDocumentForStorage(
+      COLLECTIONS.USERS,
+      {
+        ...updateData,
+        ...computeUserBlindIndexes({ email: nextEmail, cpf: nextCpf }),
+        id: userId,
+      } as StoredDoc,
+      { recordId: userId, ownerId: userId },
+    );
+    delete encryptedUpdate.id;
+    this.getCollection(COLLECTIONS.USERS).set(userId, {
+      ...rawExisting,
+      ...encryptedUpdate,
+    });
+    return { ...currentUser, ...updateData };
   }
 
   async deleteUserAndLocks(user: UserDoc): Promise<void> {
     this.getCollection(COLLECTIONS.USERS).delete(user.id);
-    this.getCollection(COLLECTIONS.EMAIL_LOCKS).delete(this.lockKey(user.email));
+    this.getCollection(COLLECTIONS.EMAIL_LOCKS).delete(
+      this.lockKey('lock:email', user.email),
+    );
     if (user.cpf) {
-      this.getCollection(COLLECTIONS.CPF_LOCKS).delete(this.lockKey(user.cpf));
+      this.getCollection(COLLECTIONS.CPF_LOCKS).delete(
+        this.lockKey('lock:cpf', user.cpf),
+      );
     }
   }
 

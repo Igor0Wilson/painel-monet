@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { redactSensitiveText } from '../common/data-crypto.utils';
 
 export interface SendBrandedEmailParams {
   toEmail: string;
@@ -15,7 +16,7 @@ export class EmailSenderService {
   hasCustomProvider(): boolean {
     const hasBrevo = Boolean(
       process.env.BREVO_API_KEY?.trim() &&
-        (process.env.MAIL_FROM_EMAIL?.trim() || process.env.MAIL_FROM?.trim()),
+      (process.env.MAIL_FROM_EMAIL?.trim() || process.env.MAIL_FROM?.trim()),
     );
     const hasResend = Boolean(process.env.RESEND_API_KEY?.trim());
     return hasBrevo || hasResend;
@@ -66,7 +67,7 @@ export class EmailSenderService {
 
       const errText = await response.text();
       this.logger.error(
-        `Falha ao enviar e-mail via Brevo (${response.status}): ${errText}`,
+        `Falha ao enviar e-mail via Brevo (${response.status}): ${redactSensitiveText(errText).slice(0, 200)}`,
       );
       return { sent: false, provider: 'brevo' };
     }
@@ -100,7 +101,7 @@ export class EmailSenderService {
 
       const errText = await response.text();
       this.logger.error(
-        `Falha ao enviar e-mail via Resend (${response.status}): ${errText}`,
+        `Falha ao enviar e-mail via Resend (${response.status}): ${redactSensitiveText(errText).slice(0, 200)}`,
       );
       return { sent: false, provider: 'resend' };
     }

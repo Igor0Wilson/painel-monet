@@ -41,3 +41,27 @@ export function normalizePhone(raw?: string | null): string {
   if (!raw) return '';
   return String(raw).replace(/\D/g, '').slice(0, 15);
 }
+
+export function maskPhone(raw?: string | null): string | null {
+  const digits = normalizePhone(raw);
+  if (!digits) return null;
+  if (digits.length < 4) return '****';
+  const last4 = digits.slice(-4);
+  if (digits.length >= 10) {
+    const ddd = digits.slice(0, 2);
+    return `(${ddd}) *****-${last4}`;
+  }
+  return `*****${last4}`;
+}
+
+export function maskEmail(raw?: string | null): string {
+  if (!raw || typeof raw !== 'string') return '***';
+  const trimmed = raw.trim();
+  const atIdx = trimmed.indexOf('@');
+  if (atIdx <= 0) return '***';
+  const local = trimmed.slice(0, atIdx);
+  const domain = trimmed.slice(atIdx + 1);
+  if (!domain) return '***';
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}***@${domain}`;
+}

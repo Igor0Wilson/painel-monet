@@ -2,10 +2,13 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { normalizeCpf } from '../common/cpf.utils';
+import { AuditService } from '../common/audit.service';
+import { maskCpf, maskEmail, maskPhone, normalizeCpf } from '../common/cpf.utils';
+import { redactSensitiveText } from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import { UserDoc } from '../firebase/firebase.types';
 import { UsersService } from '../users/users.service';
@@ -34,27 +37,26 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly firebase: FirebaseService,
     private readonly emailSender: EmailSenderService,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   private buildAuthResponse(user: UserDoc) {
-    const payload = { userId: user.id, email: user.email };
+    const payload = {
+      userId: user.id,
+      tv: user.tokenVersion ?? 1,
+    };
     return {
       access_token: this.jwtService.sign(payload),
       user: {
         id: user.id,
         name: user.name,
-        email: user.email,
-        cpf: user.cpf,
-        phone: user.phone,
+        maskedEmail: maskEmail(user.email),
+        maskedCpf: user.cpf ? maskCpf(user.cpf) : null,
+        maskedPhone: maskPhone(user.phone),
+        hasCpf: Boolean(user.cpf),
+        avatarUrl: user.avatarUrl || null,
       },
     };
-  }
-
-  private maskEmail(email: string): string {
-    const [localPart, domain] = email.split('@');
-    if (!localPart || !domain) return '***';
-    const visible = localPart.slice(0, Math.min(2, localPart.length));
-    return `${visible}***@${domain}`;
   }
 
   private async findUserByIdentifier(identifier: string): Promise<UserDoc | null> {
@@ -107,8 +109,15 @@ export class AuthService {
       decoded = await this.firebase.verifyFirebaseIdToken(idToken);
     } catch (error) {
       this.logger.warn(
-        `Falha ao validar token Firebase: ${error instanceof Error ? error.message : String(error)}`,
+        `Falha ao validar token Firebase: ${error instanceof Error ? redactSensitiveText(error.message) : 'token inválido'}`,
       );
+      void this.auditService?.log({
+        actorUserId: 'anonymous',
+        action: 'auth.login.failure',
+        resource: 'auth',
+        outcome: 'DENY',
+        details: 'invalid_firebase_token',
+      });
       throw new UnauthorizedException(
         'Sessão do Firebase inválida ou expirada. Faça login novamente.',
       );
@@ -156,12 +165,20 @@ export class AuthService {
         };
       }
 
+      void this.auditService?.log({
+        actorUserId: 'anonymous',
+        action: 'auth.login.failure',
+        resource: 'auth',
+        outcome: 'DENY',
+        details: 'account_not_found',
+      });
       throw new UnauthorizedException(
         'Conta não encontrada no banco de dados do Painel Monet. Realize seu cadastro primeiro.',
       );
     }
 
     let reactivated = false;
+    let effectiveUser = existing;
     if (existing.isActive === false) {
       const fbAccount = await this.firebase.lookupFirebaseUser({
         uid: decoded.uid,
@@ -172,7 +189,15 @@ export class AuthService {
       if (passwordUpdatedAt > requiredAfterMs && requiredAfterMs > 0) {
         await this.usersService.reactivateUser(existing.id);
         reactivated = true;
+        effectiveUser = (await this.usersService.findById(existing.id)) || existing;
       } else {
+        void this.auditService?.log({
+          actorUserId: existing.id,
+          action: 'auth.login.failure',
+          resource: 'auth',
+          outcome: 'DENY',
+          details: 'account_deactivated',
+        });
         throw new ForbiddenException({
           message:
             'Sua conta está desativada. Solicite o e-mail de reativação para definir uma nova senha e reativar seu acesso.',
@@ -181,19 +206,19 @@ export class AuthService {
       }
     }
 
-    if (!existing.firebaseUid) {
-      await this.usersService.linkFirebaseUid(existing.id, decoded.uid);
+    if (!effectiveUser.firebaseUid) {
+      await this.usersService.linkFirebaseUid(effectiveUser.id, decoded.uid);
     }
 
     const profileIncomplete =
-      !existing.name?.trim() || !existing.cpf || !existing.phone;
+      !effectiveUser.name?.trim() || !effectiveUser.cpf || !effectiveUser.phone;
     if (isGoogle && profileIncomplete) {
       const completionToken = this.jwtService.sign(
         {
           purpose: 'google_profile_completion',
           email,
           firebaseUid: decoded.uid,
-          name: existing.name || decoded.name || '',
+          name: effectiveUser.name || decoded.name || '',
         },
         { expiresIn: '15m' },
       );
@@ -203,18 +228,38 @@ export class AuthService {
         completionToken,
         googleProfile: {
           email,
-          name: existing.name || decoded.name || '',
-          cpf: existing.cpf || '',
-          phone: existing.phone || '',
+          name: effectiveUser.name || decoded.name || '',
+          cpf: '',
+          phone: '',
         },
       };
     }
 
+    void this.auditService?.log({
+      actorUserId: effectiveUser.id,
+      action: reactivated ? 'auth.account.reactivated' : 'auth.login.success',
+      resource: 'auth',
+      resourceId: effectiveUser.id,
+      outcome: 'ALLOW',
+    });
+
     return {
       requiresProfileCompletion: false,
       reactivated,
-      ...this.buildAuthResponse(existing),
+      ...this.buildAuthResponse(effectiveUser),
     };
+  }
+
+  async logout(userId: string): Promise<{ message: string }> {
+    await this.usersService.revokeUserTokens(userId);
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'auth.logout',
+      resource: 'auth',
+      resourceId: userId,
+      outcome: 'ALLOW',
+    });
+    return { message: 'Sessão encerrada com segurança.' };
   }
 
   async registerWithFirebase(dto: FirebaseRegisterDto) {
@@ -324,7 +369,7 @@ export class AuthService {
           effectiveMode,
         );
         const origin = this.getFrontendOrigin();
-        const logoUrl = origin ? `${origin}/logo192.png` : undefined;
+        const logoUrl = origin ? `${origin}/logo192.png?v=5` : undefined;
 
         const html = buildPasswordResetEmailHtml({
           userName: user.name,
@@ -367,7 +412,7 @@ export class AuthService {
         effectiveMode === 'reactivate'
           ? 'Enviamos um e-mail com o botão para definir sua nova senha e reativar sua conta.'
           : 'Enviamos um e-mail com o botão/link para redefinir sua senha.',
-      maskedEmail: this.maskEmail(user.email),
+      maskedEmail: maskEmail(user.email),
       isDeactivated: user.isActive === false,
       customTemplate: sentCustomHtml,
     };

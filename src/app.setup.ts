@@ -1,6 +1,9 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import type { NextFunction, Request, Response } from 'express';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
+import express, { NextFunction, Request, Response } from 'express';
+import { AuditService } from './common/audit.service';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+
+const setupLogger = new Logger('SecuritySetup');
 
 function getAllowedOrigins(): string[] {
   const configuredOrigins = (process.env.FRONTEND_URL || '')
@@ -37,10 +40,21 @@ export function configureApp(app: INestApplication): void {
   if (typeof expressInstance?.disable === 'function') {
     expressInstance.disable('x-powered-by');
   }
+  if (typeof expressInstance?.set === 'function') {
+    expressInstance.set('trust proxy', 1);
+  }
+
+  app.use(express.json({ limit: '100kb' }));
+  app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
   app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader(
+      'Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains',
+    );
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
     res.setHeader(
       'Content-Security-Policy',
       "default-src 'none'; frame-ancestors 'none'",
@@ -67,6 +81,9 @@ export function configureApp(app: INestApplication): void {
         return callback(null, true);
       }
 
+      setupLogger.warn(
+        `[SECURITY] Requisição CORS bloqueada para origem não autorizada: ${normalizedOrigin}`,
+      );
       return callback(new Error('Origem não permitida pelo CORS'), false);
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -74,7 +91,14 @@ export function configureApp(app: INestApplication): void {
     credentials: true,
   });
 
-  app.useGlobalFilters(new AllExceptionsFilter());
+  let auditService: AuditService | undefined;
+  try {
+    auditService = app.get(AuditService, { strict: false });
+  } catch {
+    auditService = undefined;
+  }
+
+  app.useGlobalFilters(new AllExceptionsFilter(auditService));
 
   app.useGlobalPipes(
     new ValidationPipe({

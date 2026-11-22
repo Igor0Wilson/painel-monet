@@ -14,7 +14,9 @@ import {
   buildFamilyInviteEmailText,
 } from '../auth/email-template';
 import { EmailSenderService } from '../auth/email-sender.service';
-import { isValidCpf, maskCpf, normalizeCpf } from '../common/cpf.utils';
+import { AuditService } from '../common/audit.service';
+import { isValidCpf, maskCpf, maskPhone, normalizeCpf } from '../common/cpf.utils';
+import { redactSensitiveText } from '../common/data-crypto.utils';
 import { FirebaseService } from '../firebase/firebase.service';
 import {
   COLLECTIONS,
@@ -92,6 +94,7 @@ export class FamilyService {
     private readonly firebase: FirebaseService,
     private readonly eventsService: FamilyEventsService,
     @Optional() private readonly emailSender?: EmailSenderService,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   async resolveAuthorizedScope(
@@ -174,17 +177,17 @@ export class FamilyService {
         user.cpf &&
         user.cpf === member.userCpf
       ) {
+        const perms = resolveMemberPermissionsForViewer(member, currentUser.id);
+        const allowFullContact =
+          user.id === currentUser.id || Object.values(perms).every(Boolean);
         verifiedUserIds.push(user.id);
         userMap.set(user.id, {
           id: user.id,
           name: user.name,
           maskedCpf: maskCpf(user.cpf),
-          phone: user.phone,
+          phone: allowFullContact ? user.phone : null,
         });
-        memberPermissions.set(
-          user.id,
-          resolveMemberPermissionsForViewer(member, currentUser.id),
-        );
+        memberPermissions.set(user.id, perms);
       }
     }
 
@@ -227,8 +230,10 @@ export class FamilyService {
       );
     } catch (error) {
       this.logger.warn(
-        `Falha ao emitir atualização em tempo real para o usuário ${actorUserId}: ${
-          error instanceof Error ? error.message : String(error)
+        `Falha ao emitir atualização em tempo real do Modo Família: ${
+          error instanceof Error
+            ? redactSensitiveText(error.message)
+            : 'erro inesperado'
         }`,
       );
     }
@@ -259,7 +264,9 @@ export class FamilyService {
       userId: string;
       name: string;
       maskedCpf: string;
+      maskedPhone: string | null;
       phone: string | null;
+      avatarUrl: string | null;
       role: 'owner' | 'member';
       isSelf: boolean;
       permissionsSharedWithMe: FamilyMemberPermissions;
@@ -290,18 +297,23 @@ export class FamilyService {
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .map((m) => ({ m, user: usersById.get(m.userId) }))
         .filter(({ m, user }) => user && user.cpf === m.userCpf)
-        .map(({ m, user }) => ({
-          userId: user!.id,
-          name: user!.name,
-          maskedCpf: maskCpf(user!.cpf),
-          phone: user!.phone,
-          role: m.role,
-          isSelf: user!.id === currentUser.id,
-          permissionsSharedWithMe: resolveMemberPermissionsForViewer(
-            m,
-            currentUser.id,
-          ),
-        }));
+        .map(({ m, user }) => {
+          const isSelf = user!.id === currentUser.id;
+          const perms = resolveMemberPermissionsForViewer(m, currentUser.id);
+          const allowFullContact =
+            isSelf || Object.values(perms).every(Boolean);
+          return {
+            userId: user!.id,
+            name: user!.name,
+            maskedCpf: maskCpf(user!.cpf),
+            maskedPhone: maskPhone(user!.phone),
+            phone: allowFullContact ? user!.phone : null,
+            avatarUrl: user!.avatarUrl || null,
+            role: m.role,
+            isSelf,
+            permissionsSharedWithMe: perms,
+          };
+        });
     }
 
     const [allReceived, allSent] = await Promise.all([
@@ -378,7 +390,7 @@ export class FamilyService {
           id: inv.id,
           inviterName: inviter!.name,
           inviterMaskedCpf: maskCpf(inv.inviterCpf),
-          inviterPhone: inviter!.phone,
+          inviterPhone: maskPhone(inviter!.phone),
           groupName:
             groupsById.get(inv.familyGroupId)?.name || 'Painel Família',
           createdAt: inv.createdAt,
@@ -657,7 +669,7 @@ export class FamilyService {
           .trim()
           .replace(/\/+$/, '');
         const actionUrl = `${frontendBase}/dashboard`;
-        const logoUrl = `${frontendBase}/logo192.png?v=4`;
+        const logoUrl = `${frontendBase}/logo192.png?v=5`;
         const groupName = `Família de ${inviter.name.split(' ')[0]}`;
         const maskedInviterCpf = maskCpf(inviter.cpf);
 
@@ -685,12 +697,20 @@ export class FamilyService {
         emailSent = emailRes.sent;
       } catch (err) {
         this.logger.warn(
-          `Não foi possível enviar e-mail de notificação de convite família para ${invitee.email}: ${
-            err instanceof Error ? err.message : String(err)
+          `Não foi possível enviar e-mail de notificação de convite família: ${
+            err instanceof Error ? redactSensitiveText(err.message) : 'erro desconhecido'
           }`,
         );
       }
     }
+
+    void this.auditService?.log({
+      actorUserId: inviter.id,
+      action: 'family.invite.send',
+      resource: 'family_invites',
+      resourceId: invite.id,
+      outcome: 'ALLOW',
+    });
 
     return {
       id: invite.id,
@@ -885,6 +905,15 @@ export class FamilyService {
     await this.notifyFamilyDataChanged(userId, 'data_updated');
     await this.notifyFamilyDataChanged(userId, 'family_changed');
 
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'family.privacy.update',
+      resource: 'family_members',
+      resourceId: membership.id,
+      outcome: 'ALLOW',
+      details: `fullAccessAll=${Boolean(dto.fullAccessAll)}`,
+    });
+
     return this.getStatus(userId);
   }
 
@@ -916,6 +945,14 @@ export class FamilyService {
     }
 
     this.eventsService.emitToUsers(notifyIds, 'family_changed');
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'family.leave',
+      resource: 'family_members',
+      resourceId: groupId,
+      outcome: 'ALLOW',
+    });
 
     return {
       message:

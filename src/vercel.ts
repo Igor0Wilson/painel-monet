@@ -4,6 +4,7 @@ import { ExpressAdapter } from '@nestjs/platform-express';
 import express, { Express, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
+import { redactSensitiveText } from './common/data-crypto.utils';
 
 const logger = new Logger('VercelHandler');
 let cachedServerPromise: Promise<Express> | null = null;
@@ -13,6 +14,7 @@ async function bootstrapServer(): Promise<Express> {
   const nestApp = await NestFactory.create(
     AppModule,
     new ExpressAdapter(expressApp),
+    { bodyParser: false },
   );
 
   configureApp(nestApp);
@@ -27,7 +29,9 @@ function getServer(): Promise<Express> {
       cachedServerPromise = null;
       logger.error(
         'Erro ao inicializar instância serverless NestJS',
-        error instanceof Error ? error.stack : String(error),
+        error instanceof Error
+          ? redactSensitiveText(error.message)
+          : redactSensitiveText(String(error)),
       );
       throw error;
     });
