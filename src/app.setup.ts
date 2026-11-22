@@ -5,7 +5,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 const setupLogger = new Logger('SecuritySetup');
 
-function getAllowedOrigins(): string[] {
+export function getAllowedOrigins(): string[] {
   const configuredOrigins = (process.env.FRONTEND_URL || '')
     .split(',')
     .map((origin) => origin.trim().replace(/\/+$/, ''))
@@ -15,7 +15,11 @@ function getAllowedOrigins(): string[] {
     process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
   const defaultProductionOrigins = isProduction
-    ? ['https://painel-monet-front.vercel.app']
+    ? [
+        'https://painel-monet-front.vercel.app',
+        'https://www.wssprime.com.br',
+        'https://wssprime.com.br',
+      ]
     : [];
 
   const devOrigins = isProduction

@@ -3,7 +3,7 @@ import { PassportModule } from '@nestjs/passport';
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import request from 'supertest';
-import { configureApp } from '../../src/app.setup';
+import { configureApp, getAllowedOrigins } from '../../src/app.setup';
 import { AuthModule } from '../../src/auth/auth.module';
 import { BalanceModule } from '../../src/balance/balance.module';
 import { CryptoModule } from '../../src/common/crypto.module';
@@ -358,5 +358,25 @@ describe('Security Hardening & LGPD Compliance HTTP Component', () => {
     const blocked = await storage.increment('client-1', 60000, 5, 60000, 'default');
     expect(blocked.isBlocked).toBe(true);
     expect(blocked.totalHits).toBe(6);
+  });
+
+  it('allows official production origins including www.wssprime.com.br without wildcard', () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevFrontend = process.env.FRONTEND_URL;
+    process.env.NODE_ENV = 'production';
+    delete process.env.FRONTEND_URL;
+
+    try {
+      const origins = getAllowedOrigins();
+      expect(origins).toContain('https://www.wssprime.com.br');
+      expect(origins).toContain('https://wssprime.com.br');
+      expect(origins).toContain('https://painel-monet-front.vercel.app');
+      expect(origins).not.toContain('http://localhost:3001');
+      expect(origins).not.toContain('*');
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+      if (prevFrontend === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = prevFrontend;
+    }
   });
 });
