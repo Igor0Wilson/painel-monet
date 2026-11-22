@@ -69,6 +69,10 @@ export interface ExpenseDoc {
   payments?: ExpensePaymentPart[];
   isCreditCard: boolean;
   paymentMethod: string | null;
+  pixKey?: string | null;
+  isAutoDebit?: boolean;
+  cardBank?: string | null;
+  cardLast4?: string | null;
   receiptUrl?: string | null;
   receiptPublicId?: string | null;
   createdAt: string;

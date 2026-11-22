@@ -362,4 +362,68 @@ describe('ExpensesService (Firestore)', () => {
     expect(afterFullUndo.payments).toEqual([]);
     expect(afterFullUndo.status).toBe('pendente');
   });
+
+  it('stores recurring pixKey, auto-debit, cardBank, cardLast4 and generates/pays card-specific invoice', async () => {
+    const autoDebitBill = (await service.create(
+      {
+        name: 'Internet Fibra',
+        accountTypeId: 'cat-1',
+        value: 149.9,
+        dueDate: '2026-12-10',
+        isRecurring: false,
+        pixKey: '11999998888',
+        isAutoDebit: true,
+        cardBank: 'Nubank',
+        cardLast4: '4821',
+      },
+      'u-1',
+    )) as { id: string; pixKey?: string | null; isAutoDebit?: boolean; cardBank?: string | null; cardLast4?: string | null };
+
+    expect(autoDebitBill.pixKey).toBe('11999998888');
+    expect(autoDebitBill.isAutoDebit).toBe(true);
+    expect(autoDebitBill.cardBank).toBe('Nubank');
+    expect(autoDebitBill.cardLast4).toBe('4821');
+
+    await service.create(
+      {
+        name: 'Streaming Outro Cartão',
+        accountTypeId: 'cat-1',
+        value: 50,
+        dueDate: '2026-12-10',
+        isRecurring: false,
+        isCreditCard: true,
+        paymentMethod: 'credito',
+        cardBank: 'Itaú',
+        cardLast4: '9876',
+      },
+      'u-1',
+    );
+
+    const generated = await service.generateCardInvoice('u-1', {
+      expenseIds: [autoDebitBill.id],
+      dueDate: '2026-12-15',
+    });
+
+    expect(generated.generatedCount).toBe(1);
+    expect(generated.totalGenerated).toBe(149.9);
+    expect(generated.generatedEntries[0].isCreditCard).toBe(true);
+    expect(generated.generatedEntries[0].cardBank).toBe('Nubank');
+    expect(generated.generatedEntries[0].cardLast4).toBe('4821');
+    expect(generated.generatedEntries[0].isAutoDebit).toBe(true);
+
+    // Pay specifically Nubank final 4821 invoice without paying Itaú final 9876
+    const paidNubank = await service.payCreditCardInvoice('u-1', {
+      month: '2026-12',
+      paymentMethod: 'pix',
+      cardBank: 'Nubank',
+      cardLast4: '4821',
+    });
+
+    expect(paidNubank.paidCount).toBe(1);
+    expect(paidNubank.totalPaid).toBe(149.9);
+
+    const allExpenses = await service.findAll('u-1', 'individual');
+    const itauOpen = allExpenses.find((e) => e.cardLast4 === '9876');
+    expect(itauOpen?.isPaid).toBe(false);
+  });
 });

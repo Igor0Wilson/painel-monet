@@ -32,6 +32,7 @@ import {
   parseDateOnly,
 } from '../income/income.date-utils';
 import { CreateExpenseDto } from './dto/create-expense.dto';
+import { GenerateCardInvoiceDto } from './dto/generate-card-invoice.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
 import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
@@ -61,6 +62,18 @@ function isCreditCardCategoryName(name?: string | null): boolean {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
   return normalized.includes('cartao') && normalized.includes('credito');
+}
+
+function normalizeOptionalText(raw?: string | null): string | null {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeCardLast4(raw?: string | null): string | null {
+  if (raw === undefined || raw === null) return null;
+  const digits = String(raw).replace(/\D/g, '').slice(0, 4);
+  return digits.length === 4 ? digits : null;
 }
 
 @Injectable()
@@ -213,6 +226,10 @@ export class ExpensesService {
     installments: number;
     firstInstallmentDate: string;
     sourceExpenseId?: string | null;
+    pixKey?: string | null;
+    isAutoDebit?: boolean;
+    cardBank?: string | null;
+    cardLast4?: string | null;
   }): Promise<ExpenseWithStatus[]> {
     const {
       userId,
@@ -222,6 +239,10 @@ export class ExpensesService {
       installments,
       firstInstallmentDate,
       sourceExpenseId,
+      pixKey,
+      isAutoDebit,
+      cardBank,
+      cardLast4,
     } = params;
 
     const installmentValues = this.splitValueInCents(totalValue, installments);
@@ -248,6 +269,10 @@ export class ExpensesService {
         payments: [],
         isCreditCard: true,
         paymentMethod: null,
+        pixKey: normalizeOptionalText(pixKey),
+        isAutoDebit: Boolean(isAutoDebit),
+        cardBank: normalizeOptionalText(cardBank),
+        cardLast4: normalizeCardLast4(cardLast4),
         createdAt: now,
         updatedAt: now,
       };
@@ -275,6 +300,10 @@ export class ExpensesService {
           payments: [],
           isCreditCard: true,
           paymentMethod: null,
+          pixKey: normalizeOptionalText(pixKey),
+          isAutoDebit: Boolean(isAutoDebit),
+          cardBank: normalizeOptionalText(cardBank),
+          cardLast4: normalizeCardLast4(cardLast4),
           createdAt: now,
           updatedAt: now,
         };
@@ -356,6 +385,11 @@ export class ExpensesService {
       accountType?.userId === userId &&
       isCreditCardCategoryName(accountType?.name);
 
+    const normalizedPixKey = normalizeOptionalText(dto.pixKey);
+    const normalizedCardBank = normalizeOptionalText(dto.cardBank);
+    const normalizedCardLast4 = normalizeCardLast4(dto.cardLast4);
+    const isAutoDebit = Boolean(dto.isAutoDebit);
+
     let result: ExpenseWithStatus | ExpenseWithStatus[];
 
     if (
@@ -379,6 +413,10 @@ export class ExpensesService {
         totalValue: dto.value,
         installments,
         firstInstallmentDate: firstDate,
+        pixKey: normalizedPixKey,
+        isAutoDebit,
+        cardBank: normalizedCardBank,
+        cardLast4: normalizedCardLast4,
       });
     } else if (
       dto.isInstallment &&
@@ -471,6 +509,10 @@ export class ExpensesService {
         payments,
         isCreditCard: Boolean(dto.isCreditCard || isCardCategory),
         paymentMethod: resolvedPaymentMethod,
+        pixKey: normalizedPixKey,
+        isAutoDebit,
+        cardBank: normalizedCardBank,
+        cardLast4: normalizedCardLast4,
         createdAt: now,
         updatedAt: now,
       };
@@ -493,6 +535,10 @@ export class ExpensesService {
     const count = dto.installmentCount!;
     const installmentValues = this.splitValueInCents(dto.value, count);
     const now = new Date().toISOString();
+    const normalizedPixKey = normalizeOptionalText(dto.pixKey);
+    const normalizedCardBank = normalizeOptionalText(dto.cardBank);
+    const normalizedCardLast4 = normalizeCardLast4(dto.cardLast4);
+    const isAutoDebit = Boolean(dto.isAutoDebit);
 
     for (let i = 0; i < count; i++) {
       const parcela: ExpenseDoc = {
@@ -513,6 +559,10 @@ export class ExpensesService {
         payments: [],
         isCreditCard,
         paymentMethod: null,
+        pixKey: normalizedPixKey,
+        isAutoDebit,
+        cardBank: normalizedCardBank,
+        cardLast4: normalizedCardLast4,
         createdAt: now,
         updatedAt: now,
       };
@@ -635,12 +685,22 @@ export class ExpensesService {
     }
 
     const nextPayments = [...summary.payments, newPart];
+    const resolvedCardBank =
+      dto?.cardBank !== undefined
+        ? normalizeOptionalText(dto.cardBank)
+        : expense.cardBank ?? null;
+    const resolvedCardLast4 =
+      dto?.cardLast4 !== undefined
+        ? normalizeCardLast4(dto.cardLast4)
+        : expense.cardLast4 ?? null;
 
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
       isPaid: true,
       paidAmount: summary.totalValue,
       paidAt: paidDate,
       paymentMethod: 'credito',
+      cardBank: resolvedCardBank,
+      cardLast4: resolvedCardLast4,
       payments: nextPayments,
       updatedAt: now,
     });
@@ -654,6 +714,10 @@ export class ExpensesService {
       installments,
       firstInstallmentDate,
       sourceExpenseId: expense.id,
+      pixKey: expense.pixKey ?? null,
+      isAutoDebit: Boolean(expense.isAutoDebit),
+      cardBank: resolvedCardBank,
+      cardLast4: resolvedCardLast4,
     });
 
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
@@ -672,6 +736,8 @@ export class ExpensesService {
       paidAmount: summary.totalValue,
       paidAt: paidDate,
       paymentMethod: 'credito',
+      cardBank: resolvedCardBank,
+      cardLast4: resolvedCardLast4,
       payments: nextPayments,
       updatedAt: now,
     };
@@ -805,6 +871,8 @@ export class ExpensesService {
     paidIds: string[];
   }> {
     const paymentMethod = dto.paymentMethod || 'pix';
+    const filterBank = normalizeOptionalText(dto.cardBank)?.toLowerCase() || null;
+    const filterLast4 = normalizeCardLast4(dto.cardLast4);
     const [allUserExpenses, accountTypes] = await Promise.all([
       this.firebase.findByField<ExpenseDoc>(
         COLLECTIONS.EXPENSES,
@@ -827,7 +895,17 @@ export class ExpensesService {
         Boolean(exp.isCreditCard) ||
         isCreditCardCategoryName(accountType?.name);
       const dueStr = String(exp.dueDate).split('T')[0];
-      return isCard && dueStr.startsWith(dto.month);
+      if (!isCard || !dueStr.startsWith(dto.month)) return false;
+      if (filterLast4 && normalizeCardLast4(exp.cardLast4) !== filterLast4) {
+        return false;
+      }
+      if (
+        filterBank &&
+        (normalizeOptionalText(exp.cardBank)?.toLowerCase() || '') !== filterBank
+      ) {
+        return false;
+      }
+      return true;
     });
 
     if (matching.length === 0) {
@@ -886,6 +964,107 @@ export class ExpensesService {
     };
   }
 
+  async generateCardInvoice(
+    userId: string,
+    dto: GenerateCardInvoiceDto,
+  ): Promise<{
+    generatedCount: number;
+    totalGenerated: number;
+    generatedEntries: ExpenseWithStatus[];
+  }> {
+    const uniqueIds = Array.from(new Set(dto.expenseIds));
+    const docs = await Promise.all(
+      uniqueIds.map((id) =>
+        this.firebase.findById<ExpenseDoc>(COLLECTIONS.EXPENSES, id),
+      ),
+    );
+
+    const targets = docs.filter((exp): exp is ExpenseDoc => {
+      if (!exp || exp.userId !== userId || exp.isCreditCard) return false;
+      const summary = this.resolveExpensePaymentSummary(exp);
+      return !summary.isPaid && summary.remainingAmount > 0.009;
+    });
+
+    if (targets.length === 0) {
+      throw new BadRequestException(
+        'Nenhuma conta pendente ou em débito automático elegível para gerar fatura do cartão.',
+      );
+    }
+
+    const now = new Date().toISOString();
+    const paidDate = formatDateOnly(getTodayParts());
+    const overrideBank = normalizeOptionalText(dto.cardBank);
+    const overrideLast4 = normalizeCardLast4(dto.cardLast4);
+    const installments =
+      dto.installments && dto.installments >= 1 ? dto.installments : 1;
+
+    let totalGenerated = 0;
+    const generatedEntries: ExpenseWithStatus[] = [];
+
+    for (const expense of targets) {
+      const summary = this.resolveExpensePaymentSummary(expense);
+      const remaining = summary.remainingAmount;
+      const cardBank = overrideBank ?? expense.cardBank ?? null;
+      const cardLast4 = overrideLast4 ?? expense.cardLast4 ?? null;
+
+      const nextPayments: ExpensePaymentPart[] = [
+        ...summary.payments,
+        {
+          id: uuidv4(),
+          amount: remaining,
+          paidAt: paidDate,
+          paymentMethod: 'credito',
+          createdAt: now,
+        },
+      ];
+
+      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
+        isPaid: true,
+        paidAmount: Number(expense.value),
+        paidAt: paidDate,
+        paymentMethod: 'credito',
+        cardBank,
+        cardLast4,
+        payments: nextPayments,
+        updatedAt: now,
+      });
+
+      const baseName = expense.name.replace(/\s*\(\d+\/\d+\)\s*$/, '').trim();
+      const entries = await this.createCreditCardEntries({
+        userId,
+        accountTypeId: expense.accountTypeId,
+        baseName,
+        totalValue: remaining,
+        installments,
+        firstInstallmentDate: dto.dueDate || expense.dueDate || paidDate,
+        sourceExpenseId: expense.id,
+        pixKey: expense.pixKey ?? null,
+        isAutoDebit: Boolean(expense.isAutoDebit),
+        cardBank,
+        cardLast4,
+      });
+
+      generatedEntries.push(...entries);
+      totalGenerated += remaining;
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.generate_card_invoice',
+      resource: 'expenses',
+      outcome: 'ALLOW',
+      details: `count=${targets.length}`,
+    });
+
+    return {
+      generatedCount: targets.length,
+      totalGenerated: Number(totalGenerated.toFixed(2)),
+      generatedEntries,
+    };
+  }
+
   async payBatch(
     userId: string,
     dto: PayExpensesBatchDto,
@@ -929,6 +1108,8 @@ export class ExpensesService {
 
     const now = new Date().toISOString();
     const paidDate = dto.paidAt || formatDateOnly(getTodayParts());
+    const overrideBank = normalizeOptionalText(dto.cardBank);
+    const overrideLast4 = normalizeCardLast4(dto.cardLast4);
     let totalPaid = 0;
     const paidIds: string[] = [];
 
@@ -936,6 +1117,14 @@ export class ExpensesService {
       const summary = this.resolveExpensePaymentSummary(expense);
       const remaining =
         summary.remainingAmount > 0 ? summary.remainingAmount : Number(expense.value);
+      const resolvedCardBank =
+        paymentMethod === 'credito'
+          ? overrideBank ?? expense.cardBank ?? null
+          : expense.cardBank ?? null;
+      const resolvedCardLast4 =
+        paymentMethod === 'credito'
+          ? overrideLast4 ?? expense.cardLast4 ?? null
+          : expense.cardLast4 ?? null;
       const nextPayments: ExpensePaymentPart[] = [
         ...summary.payments,
         {
@@ -952,6 +1141,8 @@ export class ExpensesService {
         paidAmount: Number(expense.value),
         paidAt: paidDate,
         paymentMethod,
+        cardBank: resolvedCardBank,
+        cardLast4: resolvedCardLast4,
         payments: nextPayments,
         updatedAt: now,
       });
@@ -966,6 +1157,10 @@ export class ExpensesService {
           installments: dto.installments!,
           firstInstallmentDate: dto.firstInstallmentDate!,
           sourceExpenseId: expense.id,
+          pixKey: expense.pixKey ?? null,
+          isAutoDebit: Boolean(expense.isAutoDebit),
+          cardBank: resolvedCardBank,
+          cardLast4: resolvedCardLast4,
         });
       }
 
@@ -1253,6 +1448,18 @@ export class ExpensesService {
     }
     if (dto.paymentMethod !== undefined) {
       updateData.paymentMethod = dto.paymentMethod;
+    }
+    if (dto.pixKey !== undefined) {
+      updateData.pixKey = normalizeOptionalText(dto.pixKey);
+    }
+    if (dto.isAutoDebit !== undefined) {
+      updateData.isAutoDebit = Boolean(dto.isAutoDebit);
+    }
+    if (dto.cardBank !== undefined) {
+      updateData.cardBank = normalizeOptionalText(dto.cardBank);
+    }
+    if (dto.cardLast4 !== undefined) {
+      updateData.cardLast4 = normalizeCardLast4(dto.cardLast4);
     }
 
     if (dto.value !== undefined && updateData.isPaid === undefined) {

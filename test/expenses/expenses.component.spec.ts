@@ -226,4 +226,51 @@ describe('Expenses HTTP Component (Controller + Service + ValidationPipe)', () =
     expect(undoRes.body.payments).toEqual([]);
     expect(undoRes.body.status).toBe('pendente');
   });
+
+  it('persists encrypted pixKey and card metadata, validates cardLast4, and generates card invoice over HTTP', async () => {
+    await request(app.getHttpServer())
+      .post('/expenses')
+      .send({
+        name: 'Cartão Inválido',
+        accountTypeId: 'cat-food',
+        value: 100,
+        dueDate: '2026-12-10',
+        isRecurring: false,
+        cardLast4: '12ab',
+      })
+      .expect(400);
+
+    const created = await request(app.getHttpServer())
+      .post('/expenses')
+      .send({
+        name: 'Energia Débito Auto',
+        accountTypeId: 'cat-food',
+        value: 210,
+        dueDate: '2026-12-05',
+        isRecurring: false,
+        pixKey: 'energia@pix.com.br',
+        isAutoDebit: true,
+        cardBank: 'Nubank',
+        cardLast4: '4821',
+      })
+      .expect(201);
+
+    expect(created.body.pixKey).toBe('energia@pix.com.br');
+    expect(created.body.isAutoDebit).toBe(true);
+    expect(created.body.cardBank).toBe('Nubank');
+    expect(created.body.cardLast4).toBe('4821');
+
+    const genRes = await request(app.getHttpServer())
+      .post('/expenses/credit-card/generate-invoice')
+      .send({
+        expenseIds: [created.body.id],
+        dueDate: '2026-12-20',
+      })
+      .expect(201);
+
+    expect(genRes.body.generatedCount).toBe(1);
+    expect(genRes.body.totalGenerated).toBe(210);
+    expect(genRes.body.generatedEntries[0].isCreditCard).toBe(true);
+    expect(genRes.body.generatedEntries[0].cardLast4).toBe('4821');
+  });
 });

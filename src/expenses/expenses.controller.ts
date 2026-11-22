@@ -24,6 +24,7 @@ import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
 import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
+import { GenerateCardInvoiceDto } from './dto/generate-card-invoice.dto';
 import { UndoPaymentDto } from './dto/undo-payment.dto';
 
 @UseGuards(JwtAuthGuard)
@@ -47,6 +48,14 @@ export class ExpensesController {
     @Request() req: AuthenticatedRequest,
   ) {
     return this.service.payCreditCardInvoice(req.user.userId, dto);
+  }
+
+  @Post('credit-card/generate-invoice')
+  generateCardInvoice(
+    @Body() dto: GenerateCardInvoiceDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.service.generateCardInvoice(req.user.userId, dto);
   }
 
   @Post('pay-batch')

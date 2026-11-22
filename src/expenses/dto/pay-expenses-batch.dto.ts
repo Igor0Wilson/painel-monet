@@ -7,6 +7,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 import type { PaymentMethod } from './pay-expense.dto';
@@ -41,4 +42,15 @@ export class PayExpensesBatchDto {
     message: 'Informe a data do pagamento no formato YYYY-MM-DD.',
   })
   paidAt?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  cardBank?: string;
+
+  @IsOptional()
+  @Matches(/^$|^\d{4}$/, {
+    message: 'Informe os 4 últimos dígitos do cartão (apenas números).',
+  })
+  cardLast4?: string;
 }

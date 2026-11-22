@@ -35,7 +35,7 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.USERS]: ['name', 'email', 'cpf', 'phone', 'avatarUrl', 'avatarPublicId'],
   [COLLECTIONS.ACCOUNT_TYPES]: ['name'],
   [COLLECTIONS.INCOME]: ['name'],
-  [COLLECTIONS.EXPENSES]: ['name', 'receiptUrl', 'receiptPublicId'],
+  [COLLECTIONS.EXPENSES]: ['name', 'receiptUrl', 'receiptPublicId', 'pixKey', 'cardBank', 'cardLast4'],
   [COLLECTIONS.INVESTMENTS]: ['name', 'category', 'notes'],
   [COLLECTIONS.FAMILY_MEMBERS]: ['userCpf'],
   [COLLECTIONS.FAMILY_INVITES]: ['inviterCpf', 'inviteeCpf'],

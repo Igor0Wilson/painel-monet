@@ -4,8 +4,10 @@ import {
   IsInt,
   IsNumber,
   IsOptional,
+  IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -38,4 +40,15 @@ export class PayExpenseDto {
   @IsOptional()
   @IsDateString({}, { message: 'Informe uma data válida para a primeira parcela.' })
   firstInstallmentDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  cardBank?: string;
+
+  @IsOptional()
+  @Matches(/^$|^\d{4}$/, {
+    message: 'Informe os 4 últimos dígitos do cartão (apenas números).',
+  })
+  cardLast4?: string;
 }

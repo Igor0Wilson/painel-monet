@@ -239,4 +239,32 @@ describe('data-crypto.utils (AES-256-GCM + AAD + Key Rotation)', () => {
       }),
     ).toThrow(/autenticação/i);
   });
+
+  it('encrypts sensitive pixKey, cardBank, and cardLast4 fields on expenses with AES-256-GCM', () => {
+    const rawExpense = {
+      id: 'exp-card-pix-1',
+      userId: 'user-card-1',
+      accountTypeId: 'cat-1',
+      name: 'Netflix Débito Automático',
+      value: 55.9,
+      pixKey: 'pagamentos@provedor.com.br',
+      isAutoDebit: true,
+      cardBank: 'Nubank',
+      cardLast4: '4821',
+    };
+
+    const encrypted = encryptDocumentForStorage(COLLECTIONS.EXPENSES, rawExpense);
+    expect(isEncryptedValue(encrypted.pixKey)).toBe(true);
+    expect(isEncryptedValue(encrypted.cardBank)).toBe(true);
+    expect(isEncryptedValue(encrypted.cardLast4)).toBe(true);
+    expect(String(encrypted.pixKey)).not.toContain('provedor');
+    expect(String(encrypted.cardBank)).not.toContain('Nubank');
+    expect(String(encrypted.cardLast4)).not.toContain('4821');
+
+    const decrypted = decryptDocumentFromStorage(COLLECTIONS.EXPENSES, encrypted);
+    expect(decrypted?.pixKey).toBe('pagamentos@provedor.com.br');
+    expect(decrypted?.cardBank).toBe('Nubank');
+    expect(decrypted?.cardLast4).toBe('4821');
+    expect(decrypted?.isAutoDebit).toBe(true);
+  });
 });

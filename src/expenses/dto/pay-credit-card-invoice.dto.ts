@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, Matches } from 'class-validator';
+import { IsIn, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 export type CashPaymentMethod = 'dinheiro' | 'pix' | 'debito';
 
@@ -19,4 +19,15 @@ export class PayCreditCardInvoiceDto {
     message: 'Informe a data do pagamento no formato YYYY-MM-DD.',
   })
   paidAt?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  cardBank?: string;
+
+  @IsOptional()
+  @Matches(/^$|^\d{4}$/, {
+    message: 'Informe os 4 últimos dígitos do cartão (apenas números).',
+  })
+  cardLast4?: string;
 }
