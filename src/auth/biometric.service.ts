@@ -26,6 +26,7 @@ import {
   verifyWebAuthnAssertionPayload,
   verifyWebAuthnRegistrationPayload,
 } from './webauthn.utils';
+import { getAllowedOrigins } from '../app.setup';
 
 const CHALLENGE_TTL_MS = 3 * 60 * 1000;
 
@@ -46,10 +47,18 @@ export class BiometricService {
       .filter(Boolean)
       .join(',');
 
-    return raw
-      .split(',')
-      .map((s) => s.trim().replace(/\/+$/, ''))
-      .filter(Boolean);
+    const combined = [
+      'https://painel-monet-front.vercel.app',
+      'https://www.wssprime.com.br',
+      'https://wssprime.com.br',
+      ...getAllowedOrigins(),
+      ...raw
+        .split(',')
+        .map((s) => s.trim().replace(/\/+$/, ''))
+        .filter(Boolean),
+    ];
+
+    return Array.from(new Set(combined));
   }
 
   private computeNativeHmacSignature(
@@ -123,12 +132,6 @@ export class BiometricService {
 
     await this.firebase.setDoc(COLLECTIONS.BIOMETRIC_CHALLENGES, challengeDoc);
 
-    const existing = await this.firebase.findByField<BiometricCredentialDoc>(
-      COLLECTIONS.BIOMETRIC_CREDENTIALS,
-      'userId',
-      userId,
-    );
-
     return {
       challengeId,
       challenge: nonce,
@@ -136,9 +139,9 @@ export class BiometricService {
       userName: user.name,
       credentialIdSuggestion,
       enrollmentSecretHex,
-      excludeCredentialIds: existing
-        .filter((c) => c.protocol === 'webauthn')
-        .map((c) => c.credentialId),
+      // Omit excludeCredentialIds so users can enroll separate Facial & Digital methods
+      // or reconfigure an existing synced Passkey / Face ID without InvalidStateError.
+      excludeCredentialIds: [],
     };
   }
 

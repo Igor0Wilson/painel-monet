@@ -82,4 +82,17 @@ export class UpdateExpenseDto {
     message: 'Informe os 4 últimos dígitos do cartão (apenas números).',
   })
   cardLast4?: string;
+
+  @IsOptional()
+  @IsIn(['only_month', 'from_month', 'all', 'all_installments'], {
+    message:
+      'Escopo de edição inválido. Use: only_month, from_month, all ou all_installments.',
+  })
+  editScope?: 'only_month' | 'from_month' | 'all' | 'all_installments';
+
+  @IsOptional()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, {
+    message: 'Informe o mês de referência no formato AAAA-MM.',
+  })
+  targetMonth?: string;
 }

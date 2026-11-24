@@ -32,7 +32,15 @@ export interface KeyRingConfig {
 }
 
 const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
-  [COLLECTIONS.USERS]: ['name', 'email', 'cpf', 'phone', 'avatarUrl', 'avatarPublicId'],
+  [COLLECTIONS.USERS]: [
+    'name',
+    'email',
+    'cpf',
+    'phone',
+    'avatarUrl',
+    'avatarPublicId',
+    'securityPinHash',
+  ],
   [COLLECTIONS.ACCOUNT_TYPES]: ['name'],
   [COLLECTIONS.INCOME]: ['name'],
   [COLLECTIONS.EXPENSES]: ['name', 'receiptUrl', 'receiptPublicId', 'pixKey', 'cardBank', 'cardLast4'],
@@ -50,10 +58,16 @@ const ENCRYPTED_STRING_FIELDS: Record<string, string[]> = {
 const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
   [COLLECTIONS.INCOME]: ['value'],
   [COLLECTIONS.EXPENSES]: ['value', 'paidAmount', 'discountAmount'],
-  [COLLECTIONS.INVESTMENTS]: ['amount'],
+  [COLLECTIONS.INVESTMENTS]: [
+    'amount',
+    'principalAmount',
+    'allocatedPrincipal',
+    'yieldAmount',
+  ],
   [COLLECTIONS.USERS]: [
     'emergencyFund',
     'externalEmergencyFund',
+    'emergencyFundTotalYield',
     'investments',
     'externalInvestments',
     'foodAllowance',
@@ -61,7 +75,14 @@ const ENCRYPTED_NUMBER_FIELDS: Record<string, string[]> = {
 };
 
 const ENCRYPTED_JSON_FIELDS: Record<string, string[]> = {
-  [COLLECTIONS.EXPENSES]: ['payments'],
+  [COLLECTIONS.EXPENSES]: ['payments', 'monthlyOverrides'],
+  [COLLECTIONS.INCOME]: ['monthlyOverrides'],
+  [COLLECTIONS.INVESTMENTS]: ['yieldHistory'],
+  [COLLECTIONS.USERS]: [
+    'vaConfig',
+    'vrConfig',
+    'emergencyFundYieldHistory',
+  ],
 };
 
 const MEDIA_BINARY_MAGIC = Buffer.from('PMENC2\0', 'ascii');

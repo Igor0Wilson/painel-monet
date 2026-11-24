@@ -18,20 +18,31 @@ import {
   AccountTypeDoc,
   COLLECTIONS,
   ExpenseDoc,
+  ExpensePaymentPart,
   FamilyMemberPermissions,
+  FoodBenefitConfig,
   IncomeDoc,
   InvestmentDoc,
   UserDoc,
+  YieldHistoryEntry,
 } from '../firebase/firebase.types';
 import {
   compareDateParts,
+  DateParts,
   evaluateIncomeCredit,
   formatDateOnly,
   getDaysInMonth,
+  getMonthKeyFromParts,
   getTodayParts,
   parseDateOnly,
+  parseMonthKey,
+  shiftMonthKey,
 } from '../income/income.date-utils';
+import { BatchUpdateInvestmentsDto } from './dto/batch-update-investments.dto';
+import { CloseFoodMonthDto } from './dto/close-food-month.dto';
 import { CreateInvestmentItemDto } from './dto/create-investment-item.dto';
+import { UpdateEmergencyYieldDto } from './dto/update-emergency-yield.dto';
+import { UpdateFoodAllowanceDto } from './dto/update-food-allowance.dto';
 import { UpdateInvestmentItemDto } from './dto/update-investment-item.dto';
 
 export interface InvestmentItemView extends InvestmentDoc {
@@ -63,15 +74,18 @@ export class BalanceService {
     }
 
     let cashExpenses = 0;
-    let foodAllowanceUsed = 0;
+    let vaUsed = 0;
+    let vrUsed = 0;
 
     for (const curr of userExpenses) {
       if (Array.isArray(curr.payments) && curr.payments.length > 0) {
         for (const part of curr.payments) {
           if (part.paymentMethod === 'credito') continue;
           const partVal = Number(part.amount || 0);
-          if (part.paymentMethod === 'va' || part.paymentMethod === 'vr') {
-            foodAllowanceUsed += partVal;
+          if (part.paymentMethod === 'va') {
+            vaUsed += partVal;
+          } else if (part.paymentMethod === 'vr') {
+            vrUsed += partVal;
           } else {
             cashExpenses += partVal;
           }
@@ -85,8 +99,10 @@ export class BalanceService {
           curr.isEarlyPayment && Number(curr.paidAmount || 0) > 0
             ? Number(Math.min(Number(curr.value), Number(curr.paidAmount)))
             : Number(curr.value);
-        if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
-          foodAllowanceUsed += val;
+        if (curr.paymentMethod === 'va') {
+          vaUsed += val;
+        } else if (curr.paymentMethod === 'vr') {
+          vrUsed += val;
         } else {
           cashExpenses += val;
         }
@@ -97,19 +113,25 @@ export class BalanceService {
         curr.paymentMethod !== 'credito'
       ) {
         const partialVal = Math.min(Number(curr.value), Number(curr.paidAmount));
-        if (curr.paymentMethod === 'va' || curr.paymentMethod === 'vr') {
-          foodAllowanceUsed += partialVal;
+        if (curr.paymentMethod === 'va') {
+          vaUsed += partialVal;
+        } else if (curr.paymentMethod === 'vr') {
+          vrUsed += partialVal;
         } else {
           cashExpenses += partialVal;
         }
       }
     }
 
+    const foodAllowanceUsed = vaUsed + vrUsed;
+
     return {
       totalIncome,
       scheduledIncome,
       cashExpenses,
       foodAllowanceUsed,
+      vaUsed: Number(vaUsed.toFixed(2)),
+      vrUsed: Number(vrUsed.toFixed(2)),
     };
   }
 
@@ -137,14 +159,50 @@ export class BalanceService {
     };
   }
 
+  private evaluateSingleFoodBenefit(
+    config: FoodBenefitConfig | null | undefined,
+    today: DateParts,
+  ) {
+    if (!config || !config.enabled) {
+      return {
+        creditedAmount: 0,
+        scheduledAmount: 0,
+        configuredAmount: 0,
+        nextCreditDate: null as string | null,
+      };
+    }
+    const evalRes = evaluateIncomeCredit(
+      {
+        value: Number(config.amount || 0),
+        incomeDate: config.creditDate || formatDateOnly(today),
+        isRecurring: Boolean(config.isRecurring),
+        recurrenceEndMonth: config.recurrenceEndMonth ?? null,
+        monthlyOverrides: config.monthlyOverrides ?? null,
+      },
+      today,
+    );
+    return {
+      creditedAmount: evalRes.creditedAmount,
+      scheduledAmount: evalRes.scheduledAmount,
+      configuredAmount: Number(config.amount || 0),
+      nextCreditDate: evalRes.nextCreditDate || config.creditDate || null,
+    };
+  }
+
   private computeUserMetrics(
     user: UserDoc,
     userIncomes: IncomeDoc[],
     userExpenses: ExpenseDoc[],
     today = getTodayParts(),
   ) {
-    const { totalIncome, scheduledIncome, cashExpenses, foodAllowanceUsed } =
-      this.computeCashAndIncome(userIncomes, userExpenses, today);
+    const {
+      totalIncome,
+      scheduledIncome,
+      cashExpenses,
+      foodAllowanceUsed,
+      vaUsed,
+      vrUsed,
+    } = this.computeCashAndIncome(userIncomes, userExpenses, today);
 
     const totalExpenses = cashExpenses + foodAllowanceUsed;
     const allocatedEmergencyFund = Number(user.emergencyFund || 0);
@@ -163,8 +221,26 @@ export class BalanceService {
     let foodAllowanceTotal = 0;
     let foodAllowanceScheduled = 0;
     let foodAllowanceNextDate: string | null = null;
+    let vaTotal = 0;
+    let vaScheduled = 0;
+    let vrTotal = 0;
+    let vrScheduled = 0;
 
-    if (foodAllowanceConfigured > 0) {
+    if (user.vaConfig || user.vrConfig) {
+      const vaEval = this.evaluateSingleFoodBenefit(user.vaConfig, today);
+      const vrEval = this.evaluateSingleFoodBenefit(user.vrConfig, today);
+      vaTotal = vaEval.creditedAmount;
+      vaScheduled = vaEval.scheduledAmount;
+      vrTotal = vrEval.creditedAmount;
+      vrScheduled = vrEval.scheduledAmount;
+      foodAllowanceTotal = vaTotal + vrTotal;
+      foodAllowanceScheduled = vaScheduled + vrScheduled;
+      const candidateDates = [vaEval.nextCreditDate, vrEval.nextCreditDate].filter(
+        (d): d is string => Boolean(d),
+      );
+      foodAllowanceNextDate =
+        candidateDates.sort((a, b) => a.localeCompare(b))[0] || foodAllowanceDate;
+    } else if (foodAllowanceConfigured > 0) {
       const foodEval = evaluateIncomeCredit(
         {
           value: foodAllowanceConfigured,
@@ -178,6 +254,8 @@ export class BalanceService {
       foodAllowanceNextDate = foodEval.nextCreditDate || foodAllowanceDate;
     }
 
+    const vaRemaining = Math.max(0, Number((vaTotal - vaUsed).toFixed(2)));
+    const vrRemaining = Math.max(0, Number((vrTotal - vrUsed).toFixed(2)));
     const foodAllowance = Math.max(
       0,
       Number((foodAllowanceTotal - foodAllowanceUsed).toFixed(2)),
@@ -196,6 +274,10 @@ export class BalanceService {
       emergencyFund: Number(emergencyFund.toFixed(2)),
       allocatedEmergencyFund: Number(allocatedEmergencyFund.toFixed(2)),
       externalEmergencyFund: Number(externalEmergencyFund.toFixed(2)),
+      emergencyFundTotalYield: Number(user.emergencyFundTotalYield || 0),
+      emergencyFundYieldHistory: Array.isArray(user.emergencyFundYieldHistory)
+        ? user.emergencyFundYieldHistory
+        : [],
       investments: Number(investments.toFixed(2)),
       allocatedInvestments: Number(allocatedInvestments.toFixed(2)),
       externalInvestments: Number(externalInvestments.toFixed(2)),
@@ -207,6 +289,16 @@ export class BalanceService {
       foodAllowanceDate,
       foodAllowanceRecurring,
       foodAllowanceNextDate,
+      vaTotal: Number(vaTotal.toFixed(2)),
+      vaScheduled: Number(vaScheduled.toFixed(2)),
+      vaUsed,
+      vaRemaining,
+      vrTotal: Number(vrTotal.toFixed(2)),
+      vrScheduled: Number(vrScheduled.toFixed(2)),
+      vrUsed,
+      vrRemaining,
+      vaConfig: user.vaConfig || null,
+      vrConfig: user.vrConfig || null,
     };
   }
 
@@ -324,6 +416,22 @@ export class BalanceService {
           foodAllowanceNextDate: permissions.viewFoodAllowance
             ? rawMetrics.foodAllowanceNextDate
             : null,
+          vaTotal: permissions.viewFoodAllowance ? rawMetrics.vaTotal : 0,
+          vaScheduled: permissions.viewFoodAllowance ? rawMetrics.vaScheduled : 0,
+          vaUsed: permissions.viewFoodAllowance ? rawMetrics.vaUsed : 0,
+          vaRemaining: permissions.viewFoodAllowance ? rawMetrics.vaRemaining : 0,
+          vrTotal: permissions.viewFoodAllowance ? rawMetrics.vrTotal : 0,
+          vrScheduled: permissions.viewFoodAllowance ? rawMetrics.vrScheduled : 0,
+          vrUsed: permissions.viewFoodAllowance ? rawMetrics.vrUsed : 0,
+          vrRemaining: permissions.viewFoodAllowance ? rawMetrics.vrRemaining : 0,
+          vaConfig: permissions.viewFoodAllowance ? rawMetrics.vaConfig : null,
+          vrConfig: permissions.viewFoodAllowance ? rawMetrics.vrConfig : null,
+          emergencyFundTotalYield: permissions.viewEmergencyFund
+            ? rawMetrics.emergencyFundTotalYield
+            : 0,
+          emergencyFundYieldHistory: permissions.viewEmergencyFund
+            ? rawMetrics.emergencyFundYieldHistory
+            : [],
         };
 
         const info = authScope.userMap.get(u.id);
@@ -419,6 +527,18 @@ export class BalanceService {
       ownFoodAllowanceDate: selfMetrics?.foodAllowanceDate ?? null,
       ownFoodAllowanceRecurring: selfMetrics?.foodAllowanceRecurring ?? true,
       ownFoodAllowanceNextDate: selfMetrics?.foodAllowanceNextDate ?? null,
+      ownVaTotal: selfMetrics?.vaTotal ?? 0,
+      ownVaScheduled: selfMetrics?.vaScheduled ?? 0,
+      ownVaUsed: selfMetrics?.vaUsed ?? 0,
+      ownVaRemaining: selfMetrics?.vaRemaining ?? 0,
+      ownVrTotal: selfMetrics?.vrTotal ?? 0,
+      ownVrScheduled: selfMetrics?.vrScheduled ?? 0,
+      ownVrUsed: selfMetrics?.vrUsed ?? 0,
+      ownVrRemaining: selfMetrics?.vrRemaining ?? 0,
+      ownVaConfig: selfMetrics?.vaConfig ?? null,
+      ownVrConfig: selfMetrics?.vrConfig ?? null,
+      ownEmergencyFundTotalYield: selfMetrics?.emergencyFundTotalYield ?? 0,
+      ownEmergencyFundYieldHistory: selfMetrics?.emergencyFundYieldHistory ?? [],
       memberBreakdown,
     };
   }
@@ -463,6 +583,7 @@ export class BalanceService {
         if (itemAmount <= remainingToReclassify + 0.001) {
           await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
             source: 'external',
+            allocatedPrincipal: 0,
             updatedAt: now,
           });
           remainingToReclassify = Number(
@@ -474,6 +595,7 @@ export class BalanceService {
           );
           await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
             amount: keepOnBalance,
+            allocatedPrincipal: keepOnBalance,
             updatedAt: now,
           });
           const movedSplit: InvestmentDoc = {
@@ -482,6 +604,9 @@ export class BalanceService {
             name: `${item.name} (reclassificado)`,
             category: item.category,
             amount: remainingToReclassify,
+            principalAmount: remainingToReclassify,
+            allocatedPrincipal: 0,
+            yieldAmount: 0,
             investedDate: item.investedDate,
             source: 'external',
             notes: item.notes ?? null,
@@ -575,10 +700,16 @@ export class BalanceService {
     let externalSum = 0;
 
     for (const item of items) {
+      const amt = Number(item.amount || 0);
       if (item.source === 'balance') {
-        balanceSum += Number(item.amount || 0);
+        const allocatedCap =
+          item.allocatedPrincipal !== undefined && item.allocatedPrincipal !== null
+            ? Math.min(amt, Number(item.allocatedPrincipal))
+            : amt;
+        balanceSum += allocatedCap;
+        externalSum += Math.max(0, Number((amt - allocatedCap).toFixed(2)));
       } else {
-        externalSum += Number(item.amount || 0);
+        externalSum += amt;
       }
     }
 
@@ -659,6 +790,11 @@ export class BalanceService {
       name: dto.name.trim(),
       category: dto.category.trim(),
       amount,
+      principalAmount: amount,
+      allocatedPrincipal: dto.source === 'balance' ? amount : 0,
+      yieldAmount: 0,
+      lastYieldUpdateAt: null,
+      yieldHistory: [],
       investedDate: dto.investedDate,
       source: dto.source,
       notes: dto.notes?.trim() || null,
@@ -721,11 +857,20 @@ export class BalanceService {
     };
     if (dto.name !== undefined) updateData.name = dto.name.trim();
     if (dto.category !== undefined) updateData.category = dto.category.trim();
-    if (dto.amount !== undefined) updateData.amount = nextAmount;
+    if (dto.amount !== undefined) {
+      updateData.amount = nextAmount;
+      updateData.principalAmount = nextAmount;
+      updateData.yieldAmount = 0;
+    }
     if (dto.investedDate !== undefined) {
       updateData.investedDate = dto.investedDate;
     }
-    if (dto.source !== undefined) updateData.source = dto.source;
+    if (dto.source !== undefined) {
+      updateData.source = dto.source;
+      updateData.allocatedPrincipal = dto.source === 'balance' ? nextAmount : 0;
+    } else if (dto.amount !== undefined && existing.source === 'balance') {
+      updateData.allocatedPrincipal = nextAmount;
+    }
     if (dto.notes !== undefined) updateData.notes = dto.notes.trim() || null;
 
     await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, itemId, updateData);
@@ -733,6 +878,91 @@ export class BalanceService {
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
     return { ...existing, ...updateData };
+  }
+
+  async batchUpdateInvestmentBalances(
+    userId: string,
+    dto: BatchUpdateInvestmentsDto,
+  ) {
+    const items = await this.firebase.findByField<InvestmentDoc>(
+      COLLECTIONS.INVESTMENTS,
+      'userId',
+      userId,
+    );
+    const itemsById = new Map(items.map((it) => [it.id, it]));
+    const today = getTodayParts();
+    const month = dto.month || getMonthKeyFromParts(today);
+    const date = dto.date || formatDateOnly(today);
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+    let totalYieldDelta = 0;
+
+    for (const upd of dto.updates) {
+      const existing = itemsById.get(upd.id);
+      if (!existing || existing.userId !== userId) {
+        throw new NotFoundException(`Investimento ${upd.id} não encontrado.`);
+      }
+      const newAmount = Number(Number(upd.newAmount).toFixed(2));
+      const previousAmount = Number(Number(existing.amount).toFixed(2));
+      const delta = Number((newAmount - previousAmount).toFixed(2));
+      if (Math.abs(delta) < 0.005) continue;
+
+      const principal =
+        existing.principalAmount !== undefined && existing.principalAmount !== null
+          ? Number(existing.principalAmount)
+          : previousAmount;
+      const allocatedCap =
+        existing.source === 'balance'
+          ? (existing.allocatedPrincipal !== undefined &&
+            existing.allocatedPrincipal !== null
+              ? Number(existing.allocatedPrincipal)
+              : previousAmount)
+          : 0;
+      const yieldAmount = Number((newAmount - principal).toFixed(2));
+      const historyEntry: YieldHistoryEntry = {
+        id: uuidv4(),
+        month,
+        previousAmount,
+        newAmount,
+        delta,
+        date,
+        note: upd.note?.trim() || 'Atualização de saldo / rendimento',
+      };
+      const nextHistory = [
+        ...(Array.isArray(existing.yieldHistory) ? existing.yieldHistory : []),
+        historyEntry,
+      ].slice(-36);
+
+      await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, existing.id, {
+        amount: newAmount,
+        principalAmount: principal,
+        allocatedPrincipal: allocatedCap,
+        yieldAmount,
+        lastYieldUpdateAt: date,
+        yieldHistory: nextHistory,
+        updatedAt: now,
+      });
+      updatedCount += 1;
+      totalYieldDelta = Number((totalYieldDelta + delta).toFixed(2));
+    }
+
+    if (updatedCount > 0) {
+      await this.syncUserInvestmentTotalsFromItems(userId);
+      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+      void this.auditService?.log({
+        actorUserId: userId,
+        action: 'investments.batch_yield_update',
+        resource: 'investments',
+        outcome: 'ALLOW',
+        details: `count=${updatedCount}`,
+      });
+    }
+
+    return {
+      updatedCount,
+      totalYieldDelta,
+      balance: await this.getBalance(userId, 'individual'),
+    };
   }
 
   async removeInvestmentItem(userId: string, itemId: string): Promise<void> {
@@ -800,6 +1030,7 @@ export class BalanceService {
             if (item.source === 'balance') {
               await this.firebase.updateDoc(COLLECTIONS.INVESTMENTS, item.id, {
                 source: 'external',
+                allocatedPrincipal: 0,
                 updatedAt: now,
               });
             }
@@ -857,6 +1088,86 @@ export class BalanceService {
     });
   }
 
+  async applyEmergencyFundYield(
+    userId: string,
+    dto: UpdateEmergencyYieldDto,
+  ) {
+    const user = await this.firebase.findById<UserDoc>(
+      COLLECTIONS.USERS,
+      userId,
+    );
+    if (!user) {
+      throw new NotFoundException('Usuário não encontrado.');
+    }
+    if (dto.newTotal === undefined && dto.yieldAmount === undefined) {
+      throw new BadRequestException(
+        'Informe o novo saldo total da reserva ou o valor do rendimento.',
+      );
+    }
+
+    const allocated = Number(user.emergencyFund || 0);
+    const external = Number(user.externalEmergencyFund || 0);
+    const currentTotal = Number((allocated + external).toFixed(2));
+    const targetTotal =
+      dto.newTotal !== undefined
+        ? Number(Number(dto.newTotal).toFixed(2))
+        : Number((currentTotal + Number(dto.yieldAmount || 0)).toFixed(2));
+    const delta = Number((targetTotal - currentTotal).toFixed(2));
+
+    if (targetTotal < 0) {
+      throw new BadRequestException('O saldo total da reserva não pode ser negativo.');
+    }
+
+    const nextExternal = Number((external + delta).toFixed(2));
+    if (nextExternal < -0.001) {
+      throw new BadRequestException(
+        'Para reduzir abaixo do valor alocado do mês, resgate ou reclassifique a parte alocada do mês primeiro.',
+      );
+    }
+
+    const today = getTodayParts();
+    const month = dto.month || getMonthKeyFromParts(today);
+    const date = dto.date || formatDateOnly(today);
+    const now = new Date().toISOString();
+
+    const entry: YieldHistoryEntry = {
+      id: uuidv4(),
+      month,
+      previousAmount: currentTotal,
+      newAmount: targetTotal,
+      delta,
+      date,
+      note: dto.note?.trim() || 'Rendimento / ajuste de saldo da reserva',
+    };
+    const nextHistory = [
+      ...(Array.isArray(user.emergencyFundYieldHistory)
+        ? user.emergencyFundYieldHistory
+        : []),
+      entry,
+    ].slice(-36);
+    const nextTotalYield = Number(
+      (Number(user.emergencyFundTotalYield || 0) + delta).toFixed(2),
+    );
+
+    await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+      externalEmergencyFund: Math.max(0, nextExternal),
+      emergencyFundTotalYield: nextTotalYield,
+      emergencyFundYieldHistory: nextHistory,
+      updatedAt: now,
+    });
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'emergency_fund.yield_update',
+      resource: 'users',
+      resourceId: userId,
+      outcome: 'ALLOW',
+    });
+
+    return this.getBalance(userId, 'individual');
+  }
+
   async updateInvestments(
     userId: string,
     amount: number,
@@ -876,11 +1187,86 @@ export class BalanceService {
     });
   }
 
+  private mergeFoodBenefitWithScope(
+    existing: FoodBenefitConfig | null | undefined,
+    incoming: {
+      enabled: boolean;
+      amount: number;
+      creditDate: string;
+      isRecurring: boolean;
+      mode: 'fixed' | 'variable';
+    },
+    editScope: 'only_month' | 'from_month' | 'all',
+    targetMonth: string,
+  ): FoodBenefitConfig {
+    if (!existing || !existing.enabled || editScope === 'all') {
+      return {
+        enabled: incoming.enabled,
+        amount: Number(Number(incoming.amount).toFixed(2)),
+        creditDate: incoming.creditDate,
+        isRecurring: Boolean(incoming.isRecurring),
+        mode: incoming.mode,
+        recurrenceEndMonth: existing?.recurrenceEndMonth ?? null,
+        monthlyOverrides: existing?.monthlyOverrides ?? {},
+      };
+    }
+
+    const startMonth = getMonthKeyFromParts(
+      parseDateOnly(existing.creditDate || incoming.creditDate),
+    );
+    const overrides = { ...(existing.monthlyOverrides || {}) };
+
+    if (editScope === 'only_month') {
+      overrides[targetMonth] = {
+        amount: Number(Number(incoming.amount).toFixed(2)),
+        creditDate: incoming.creditDate,
+        skipped: !incoming.enabled,
+      };
+      return {
+        ...existing,
+        mode: incoming.mode,
+        monthlyOverrides: overrides,
+      };
+    }
+
+    // from_month: preserva os meses passados [startMonth .. targetMonth-1] com o valor anterior
+    if (existing.isRecurring && targetMonth > startMonth) {
+      let cursor = startMonth;
+      let guard = 0;
+      while (cursor < targetMonth && guard < 120) {
+        if (!overrides[cursor]) {
+          overrides[cursor] = {
+            amount: Number(existing.amount || 0),
+          };
+        }
+        cursor = shiftMonthKey(cursor, 1);
+        guard += 1;
+      }
+    }
+
+    Object.keys(overrides).forEach((mKey) => {
+      if (mKey >= targetMonth) {
+        delete overrides[mKey];
+      }
+    });
+
+    return {
+      enabled: incoming.enabled,
+      amount: Number(Number(incoming.amount).toFixed(2)),
+      creditDate: incoming.creditDate,
+      isRecurring: Boolean(incoming.isRecurring),
+      mode: incoming.mode,
+      recurrenceEndMonth: existing.recurrenceEndMonth ?? null,
+      monthlyOverrides: overrides,
+    };
+  }
+
   async updateFoodAllowance(
     userId: string,
     amount: number,
     creditDate?: string,
     isRecurring?: boolean,
+    extraDto?: UpdateFoodAllowanceDto,
   ) {
     if (amount < 0) {
       throw new BadRequestException(
@@ -893,18 +1279,266 @@ export class BalanceService {
     );
     if (user) {
       const todayIso = formatDateOnly(getTodayParts());
-      await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
-        foodAllowance: Number(amount),
-        foodAllowanceDate: creditDate || user.foodAllowanceDate || todayIso,
-        foodAllowanceRecurring:
-          isRecurring !== undefined
-            ? Boolean(isRecurring)
-            : (user.foodAllowanceRecurring ?? true),
-        updatedAt: new Date().toISOString(),
-      });
+      const now = new Date().toISOString();
+      const editScope = extraDto?.editScope || 'all';
+      const targetMonth =
+        extraDto?.targetMonth || getMonthKeyFromParts(getTodayParts());
+
+      if (extraDto?.va || extraDto?.vr || extraDto?.benefit === 'va' || extraDto?.benefit === 'vr') {
+        let nextVa = user.vaConfig ?? null;
+        let nextVr = user.vrConfig ?? null;
+
+        if (extraDto.va) {
+          nextVa = this.mergeFoodBenefitWithScope(
+            user.vaConfig,
+            {
+              enabled: extraDto.va.enabled,
+              amount: Number(extraDto.va.amount || 0),
+              creditDate: extraDto.va.creditDate || todayIso,
+              isRecurring: Boolean(extraDto.va.isRecurring),
+              mode: extraDto.va.mode || 'fixed',
+            },
+            editScope,
+            targetMonth,
+          );
+        } else if (extraDto.benefit === 'va') {
+          nextVa = this.mergeFoodBenefitWithScope(
+            user.vaConfig,
+            {
+              enabled: amount > 0,
+              amount: Number(amount),
+              creditDate: creditDate || user.vaConfig?.creditDate || todayIso,
+              isRecurring: isRecurring ?? user.vaConfig?.isRecurring ?? true,
+              mode: extraDto.mode || user.vaConfig?.mode || 'fixed',
+            },
+            editScope,
+            targetMonth,
+          );
+        }
+
+        if (extraDto.vr) {
+          nextVr = this.mergeFoodBenefitWithScope(
+            user.vrConfig,
+            {
+              enabled: extraDto.vr.enabled,
+              amount: Number(extraDto.vr.amount || 0),
+              creditDate: extraDto.vr.creditDate || todayIso,
+              isRecurring: Boolean(extraDto.vr.isRecurring),
+              mode: extraDto.vr.mode || 'variable',
+            },
+            editScope,
+            targetMonth,
+          );
+        } else if (extraDto.benefit === 'vr') {
+          nextVr = this.mergeFoodBenefitWithScope(
+            user.vrConfig,
+            {
+              enabled: amount > 0,
+              amount: Number(amount),
+              creditDate: creditDate || user.vrConfig?.creditDate || todayIso,
+              isRecurring: isRecurring ?? user.vrConfig?.isRecurring ?? true,
+              mode: extraDto.mode || user.vrConfig?.mode || 'variable',
+            },
+            editScope,
+            targetMonth,
+          );
+        }
+
+        const totalConfigured = Number(
+          (
+            (nextVa?.enabled ? Number(nextVa.amount || 0) : 0) +
+            (nextVr?.enabled ? Number(nextVr.amount || 0) : 0)
+          ).toFixed(2),
+        );
+
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          vaConfig: nextVa,
+          vrConfig: nextVr,
+          foodAllowance: totalConfigured,
+          foodAllowanceDate:
+            nextVa?.creditDate || nextVr?.creditDate || user.foodAllowanceDate || todayIso,
+          foodAllowanceRecurring:
+            Boolean(nextVa?.isRecurring) || Boolean(nextVr?.isRecurring),
+          updatedAt: now,
+        });
+      } else {
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          foodAllowance: Number(amount),
+          foodAllowanceDate: creditDate || user.foodAllowanceDate || todayIso,
+          foodAllowanceRecurring:
+            isRecurring !== undefined
+              ? Boolean(isRecurring)
+              : (user.foodAllowanceRecurring ?? true),
+          updatedAt: now,
+        });
+      }
       await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
     }
     return this.getBalance(userId, 'individual');
+  }
+
+  async closeFoodAllowanceMonth(userId: string, dto: CloseFoodMonthDto) {
+    const parsedTarget = parseMonthKey(dto.month);
+    if (!parsedTarget) {
+      throw new BadRequestException('Informe o mês no formato AAAA-MM.');
+    }
+
+    const [user, userIncomes, userExpenses, accountTypes] = await Promise.all([
+      this.firebase.findById<UserDoc>(COLLECTIONS.USERS, userId),
+      this.firebase.findByField<IncomeDoc>(COLLECTIONS.INCOME, 'userId', userId),
+      this.firebase.findByField<ExpenseDoc>(COLLECTIONS.EXPENSES, 'userId', userId),
+      this.firebase.findByField<AccountTypeDoc>(
+        COLLECTIONS.ACCOUNT_TYPES,
+        'userId',
+        userId,
+      ),
+    ]);
+
+    if (!user) {
+      throw new NotFoundException('Usuário não encontrado.');
+    }
+
+    const today = getTodayParts();
+    const closingParts = parseDateOnly(dto.closingDate);
+    const evalDate =
+      compareDateParts(closingParts, today) > 0 ? closingParts : today;
+    const metrics = this.computeUserMetrics(
+      user,
+      userIncomes,
+      userExpenses,
+      evalDate,
+    );
+
+    const hasSeparatedConfigs = Boolean(user.vaConfig || user.vrConfig);
+    const expectedRemaining =
+      dto.benefit === 'va' && hasSeparatedConfigs
+        ? metrics.vaRemaining
+        : dto.benefit === 'vr' && hasSeparatedConfigs
+          ? metrics.vrRemaining
+          : metrics.foodAllowance;
+
+    const actualRemaining = Number(Number(dto.actualRemaining).toFixed(2));
+    const diff = Number((expectedRemaining - actualRemaining).toFixed(2));
+    const now = new Date().toISOString();
+
+    if (Math.abs(diff) < 0.01) {
+      return {
+        adjusted: false,
+        diff: 0,
+        balance: await this.getBalance(userId, 'individual'),
+      };
+    }
+
+    if (diff > 0) {
+      let foodCat = accountTypes.find(
+        (t) => normalizeOfficialCategory(t.name) === 'Alimentação',
+      );
+      if (!foodCat) {
+        foodCat = {
+          id: uuidv4(),
+          name: 'Alimentação',
+          userId,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await this.firebase.setDoc(COLLECTIONS.ACCOUNT_TYPES, foodCat);
+      }
+
+      const method: 'va' | 'vr' =
+        dto.benefit === 'vr' ? 'vr' : dto.benefit === 'va' ? 'va' : 'va';
+      const cleanDate = String(dto.closingDate).split('T')[0];
+      const labelPrefix =
+        dto.benefit === 'vr'
+          ? 'Fechamento VR'
+          : dto.benefit === 'va'
+            ? 'Fechamento VA'
+            : 'Fechamento VA/VR';
+
+      const closingExpense: ExpenseDoc = {
+        id: uuidv4(),
+        userId,
+        accountTypeId: foodCat.id,
+        name: dto.note?.trim() || `${labelPrefix} (${dto.month})`,
+        value: diff,
+        dueDate: cleanDate,
+        isRecurring: false,
+        isInstallment: false,
+        installmentCount: null,
+        installmentNumber: null,
+        parentExpenseId: null,
+        isPaid: true,
+        paidAmount: diff,
+        discountAmount: 0,
+        isEarlyPayment: false,
+        paidAt: cleanDate,
+        payments: [
+          {
+            id: uuidv4(),
+            amount: diff,
+            paidAt: cleanDate,
+            paymentMethod: method,
+            createdAt: now,
+          },
+        ],
+        isCreditCard: false,
+        paymentMethod: method,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.firebase.setDoc(COLLECTIONS.EXPENSES, closingExpense);
+    } else {
+      const creditExtra = Math.abs(diff);
+      if (hasSeparatedConfigs) {
+        const targetKey =
+          dto.benefit === 'vr' && user.vrConfig
+            ? 'vrConfig'
+            : user.vaConfig
+              ? 'vaConfig'
+              : 'vrConfig';
+        const cfg = user[targetKey];
+        if (cfg) {
+          const ov = cfg.monthlyOverrides?.[dto.month];
+          const baseAmt = ov?.amount !== undefined ? Number(ov.amount) : Number(cfg.amount || 0);
+          const nextCfg: FoodBenefitConfig = {
+            ...cfg,
+            monthlyOverrides: {
+              ...(cfg.monthlyOverrides || {}),
+              [dto.month]: {
+                ...(ov || {}),
+                amount: Number((baseAmt + creditExtra).toFixed(2)),
+                skipped: false,
+              },
+            },
+          };
+          await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+            [targetKey]: nextCfg,
+            updatedAt: now,
+          });
+        }
+      } else {
+        const nextFood = Number((Number(user.foodAllowance || 0) + creditExtra).toFixed(2));
+        await this.firebase.updateDoc(COLLECTIONS.USERS, userId, {
+          foodAllowance: nextFood,
+          updatedAt: now,
+        });
+      }
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'food_allowance.close_month',
+      resource: 'users',
+      resourceId: userId,
+      outcome: 'ALLOW',
+      details: `month=${dto.month},diff=${diff}`,
+    });
+
+    return {
+      adjusted: true,
+      diff,
+      balance: await this.getBalance(userId, 'individual'),
+    };
   }
 
   private resolveMonthParam(month?: string): {
@@ -991,22 +1625,42 @@ export class BalanceService {
     const dailyExpenseMap = new Map<number, number>();
     const targetMonthIdx = year * 12 + (monthNum - 1);
 
+    const materializedByParentAndMonth = new Set(
+      expenses
+        .filter((e) => e.recurrenceParentId && e.occurrenceMonth)
+        .map((e) => `${e.recurrenceParentId}::${e.occurrenceMonth}`),
+    );
+
     expenses.forEach((e) => {
       if (e.paymentMethod === 'credito' && !e.isCreditCard) return;
       const d = parseDateOnly(e.dueDate);
       const expMonthIdx = d.year * 12 + (d.month - 1);
 
       const isSameMonth = d.year === year && d.month === monthNum;
+      const parsedEnd = parseMonthKey(e.recurrenceEndMonth);
+      const endMonthIdx = parsedEnd ? parsedEnd.monthIndex : Number.POSITIVE_INFINITY;
+      const ov = e.isRecurring ? e.monthlyOverrides?.[monthKey] : undefined;
+      const isMaterializedHere =
+        Boolean(e.isRecurring) &&
+        materializedByParentAndMonth.has(`${e.id}::${monthKey}`);
+
       const isRecurringInMonth =
-        Boolean(e.isRecurring) && targetMonthIdx >= expMonthIdx;
+        Boolean(e.isRecurring) &&
+        targetMonthIdx >= expMonthIdx &&
+        targetMonthIdx <= endMonthIdx &&
+        !ov?.skipped &&
+        !isMaterializedHere;
 
       const effectiveVal =
-        e.isPaid && e.isEarlyPayment && Number(e.paidAmount || 0) > 0
-          ? Number(Math.min(Number(e.value), Number(e.paidAmount)))
-          : Number(e.value);
+        ov?.value !== undefined
+          ? Number(ov.value)
+          : e.isPaid && e.isEarlyPayment && Number(e.paidAmount || 0) > 0
+            ? Number(Math.min(Number(e.value), Number(e.paidAmount)))
+            : Number(e.value);
 
-      if (isSameMonth || isRecurringInMonth) {
-        const rawCatName = typesById.get(e.accountTypeId)?.name;
+      if ((!e.isRecurring && isSameMonth) || isRecurringInMonth) {
+        const resolvedCatId = ov?.accountTypeId ?? e.accountTypeId;
+        const rawCatName = typesById.get(resolvedCatId)?.name;
         const catName = normalizeOfficialCategory(rawCatName);
         categoryMap.set(catName, (categoryMap.get(catName) || 0) + effectiveVal);
       }
@@ -1043,26 +1697,31 @@ export class BalanceService {
 
     incomes.forEach((inc) => {
       const start = parseDateOnly(inc.incomeDate);
-      const val = Number(inc.value);
+      const baseVal = Number(inc.value);
 
       if (!inc.isRecurring) {
         if (start.year === year && start.month === monthNum) {
           if (compareDateParts(start, today) <= 0) {
-            monthTotalIncome += val;
+            monthTotalIncome += baseVal;
             dailyIncomeMap.set(
               start.day,
-              (dailyIncomeMap.get(start.day) || 0) + val,
+              (dailyIncomeMap.get(start.day) || 0) + baseVal,
             );
           } else {
-            monthScheduledIncome += val;
+            monthScheduledIncome += baseVal;
           }
         }
       } else {
         const startMonthIdx = start.year * 12 + (start.month - 1);
-        const targetMonthIdx = year * 12 + (monthNum - 1);
-        if (targetMonthIdx < startMonthIdx) return;
+        const parsedEnd = parseMonthKey(inc.recurrenceEndMonth);
+        const endMonthIdx = parsedEnd ? parsedEnd.monthIndex : Number.POSITIVE_INFINITY;
+        if (targetMonthIdx < startMonthIdx || targetMonthIdx > endMonthIdx) return;
 
-        const payDay = Math.min(start.day, daysInMonth);
+        const ov = inc.monthlyOverrides?.[monthKey];
+        if (ov?.skipped) return;
+
+        const val = ov?.value !== undefined ? Number(ov.value) : baseVal;
+        const payDay = Math.min(ov?.day ?? start.day, daysInMonth);
         const occDate = { year, month: monthNum, day: payDay };
         if (compareDateParts(occDate, today) <= 0) {
           monthTotalIncome += val;

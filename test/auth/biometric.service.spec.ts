@@ -299,4 +299,143 @@ describe('BiometricService (WebAuthn Facial + Mobile Native Digital/Facial)', ()
       }),
     ).rejects.toThrow(BadRequestException);
   });
+
+  it('supports synced Face ID / Passkeys (signCount 0 & equal count), RS256 keys, Vercel preview origins, and separate Digital + Facial slots on Google account without excludeCredentialIds blocking', async () => {
+    await firebase.setDoc(COLLECTIONS.USERS, {
+      id: 'u-google-1',
+      name: 'Usuario Gmail',
+      email: 'usuario@gmail.com',
+      cpf: '52998224725',
+      phone: '11999990000',
+      firebaseUid: 'fb-g-1',
+      authProvider: 'google',
+      isActive: true,
+      deactivatedAt: null,
+      deactivatedAtMs: null,
+      emergencyFund: 0,
+      investments: 0,
+      createdAt: '',
+      updatedAt: '',
+    });
+
+    // 1. Register native fingerprint first
+    const fpOpts = await biometricService.createRegistrationOptions('u-google-1', {
+      protocol: 'native_hmac',
+      kind: 'fingerprint',
+      platform: 'mobile_android',
+    });
+    const fpSig = hmacSha256Hex(
+      fpOpts.enrollmentSecretHex!,
+      `pm-bio-v1:${fpOpts.challenge}:${fpOpts.credentialIdSuggestion}`,
+    );
+    await biometricService.verifyAndSaveRegistration('u-google-1', {
+      challengeId: fpOpts.challengeId,
+      protocol: 'native_hmac',
+      kind: 'fingerprint',
+      platform: 'mobile_android',
+      credentialId: fpOpts.credentialIdSuggestion,
+      signature: fpSig,
+    });
+
+    // 2. Register WebAuthn RSA RS256 (-257) facial passkey on Vercel preview origin with signCount = 0
+    delete process.env.FRONTEND_URL;
+    const faceOpts = await biometricService.createRegistrationOptions('u-google-1', {
+      protocol: 'webauthn',
+      kind: 'facial',
+      platform: 'web',
+    });
+    expect(faceOpts.excludeCredentialIds).toEqual([]);
+
+    const rsaPair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const rsaJwk = rsaPair.publicKey.export({ format: 'jwk' }) as {
+      n: string;
+      e: string;
+    };
+    const coseRsa = Buffer.concat([
+      Buffer.from([0xa4]),
+      encodeCborInt(1),
+      encodeCborInt(3),
+      encodeCborInt(3),
+      encodeCborInt(-257),
+      encodeCborInt(-1),
+      encodeCborBytes(Buffer.from(rsaJwk.n, 'base64url')),
+      encodeCborInt(-2),
+      encodeCborBytes(Buffer.from(rsaJwk.e, 'base64url')),
+    ]);
+
+    const credIdBuf = Buffer.from('face-preview-cred-rsa');
+    const credIdLenBuf = Buffer.alloc(2);
+    credIdLenBuf.writeUInt16BE(credIdBuf.length, 0);
+    const previewHost = 'painel-monet-front-git-feature-igor.vercel.app';
+    const previewOrigin = `https://${previewHost}`;
+    const rpIdHash = createHash('sha256').update(previewHost).digest();
+
+    const authData = Buffer.concat([
+      rpIdHash,
+      Buffer.from([0x45]), // UP + UV + AT
+      Buffer.alloc(4), // signCount = 0 (Apple Face ID / synced passkey)
+      Buffer.alloc(16),
+      credIdLenBuf,
+      credIdBuf,
+      coseRsa,
+    ]);
+    const attObj = Buffer.concat([
+      Buffer.from([0xa2]),
+      encodeCborText('fmt'),
+      encodeCborText('none'),
+      encodeCborText('authData'),
+      encodeCborBytes(authData),
+    ]);
+    const faceReg = await biometricService.verifyAndSaveRegistration('u-google-1', {
+      challengeId: faceOpts.challengeId,
+      protocol: 'webauthn',
+      kind: 'facial',
+      platform: 'web',
+      clientDataJSON: Buffer.from(
+        JSON.stringify({
+          type: 'webauthn.create',
+          challenge: faceOpts.challenge,
+          origin: previewOrigin,
+        }),
+      ).toString('base64url'),
+      attestationObject: attObj.toString('base64url'),
+    });
+
+    // Both Digital and Facial coexist cleanly
+    const listed = await biometricService.listCredentials('u-google-1');
+    expect(listed.map((c) => c.kind).sort()).toEqual(['facial', 'fingerprint']);
+
+    // Login assertion with signCount = 0 (same as stored 0) must succeed & preserve authProvider='google'
+    const loginOpts = await biometricService.createLoginOptions({
+      credentialId: faceReg.credentialId,
+    });
+    const loginClientData = Buffer.from(
+      JSON.stringify({
+        type: 'webauthn.get',
+        challenge: loginOpts.challenge,
+        origin: 'https://www.wssprime.com.br',
+      }),
+    );
+    const loginAuthData = Buffer.concat([
+      createHash('sha256').update('www.wssprime.com.br').digest(),
+      Buffer.from([0x05]),
+      Buffer.alloc(4), // signCount = 0 again
+    ]);
+    const clientDataHash = createHash('sha256').update(loginClientData).digest();
+    const rsaSig = sign(
+      'sha256',
+      Buffer.concat([loginAuthData, clientDataHash]),
+      rsaPair.privateKey,
+    );
+
+    const loggedGoogleUser = await biometricService.verifyLoginAssertion({
+      challengeId: loginOpts.challengeId,
+      credentialId: faceReg.credentialId,
+      clientDataJSON: loginClientData.toString('base64url'),
+      authenticatorData: loginAuthData.toString('base64url'),
+      signature: rsaSig.toString('base64url'),
+    });
+    expect(loggedGoogleUser.id).toBe('u-google-1');
+    expect(loggedGoogleUser.authProvider).toBe('google');
+  });
 });

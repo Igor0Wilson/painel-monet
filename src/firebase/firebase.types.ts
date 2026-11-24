@@ -1,3 +1,29 @@
+export interface FoodMonthlyOverride {
+  amount?: number;
+  creditDate?: string;
+  skipped?: boolean;
+}
+
+export interface FoodBenefitConfig {
+  enabled: boolean;
+  amount: number;
+  creditDate: string;
+  isRecurring: boolean;
+  mode: 'fixed' | 'variable';
+  recurrenceEndMonth?: string | null;
+  monthlyOverrides?: Record<string, FoodMonthlyOverride>;
+}
+
+export interface YieldHistoryEntry {
+  id: string;
+  month: string;
+  previousAmount: number;
+  newAmount: number;
+  delta: number;
+  date: string;
+  note?: string | null;
+}
+
 export interface UserDoc {
   id: string;
   name: string;
@@ -17,13 +43,22 @@ export interface UserDoc {
   deactivatedAtMs: number | null;
   emergencyFund: number;
   externalEmergencyFund?: number;
+  emergencyFundTotalYield?: number;
+  emergencyFundYieldHistory?: YieldHistoryEntry[];
   investments: number;
   externalInvestments?: number;
   foodAllowance?: number;
   foodAllowanceDate?: string | null;
   foodAllowanceRecurring?: boolean;
+  vaConfig?: FoodBenefitConfig | null;
+  vrConfig?: FoodBenefitConfig | null;
   createdAt: string;
   updatedAt: string;
+  securityPinHash?: string | null;
+  securityPinVersion?: number;
+  securityPinUpdatedAt?: string | null;
+  securityPinFailedAttempts?: number;
+  securityPinLockedUntilMs?: number | null;
 }
 
 export interface AccountTypeDoc {
@@ -50,6 +85,22 @@ export interface ExpensePaymentPart {
   createdAt?: string;
 }
 
+export interface ExpenseMonthlyOverride {
+  value?: number;
+  name?: string;
+  day?: number;
+  accountTypeId?: string;
+  skipped?: boolean;
+  materializedExpenseId?: string;
+}
+
+export interface IncomeMonthlyOverride {
+  value?: number;
+  name?: string;
+  day?: number;
+  skipped?: boolean;
+}
+
 export interface ExpenseDoc {
   id: string;
   userId: string;
@@ -58,6 +109,11 @@ export interface ExpenseDoc {
   value: number;
   dueDate: string;
   isRecurring: boolean;
+  recurrenceEndMonth?: string | null;
+  recurrenceGroupId?: string | null;
+  recurrenceParentId?: string | null;
+  occurrenceMonth?: string | null;
+  monthlyOverrides?: Record<string, ExpenseMonthlyOverride>;
   isInstallment: boolean;
   installmentCount: number | null;
   installmentNumber: number | null;
@@ -88,6 +144,9 @@ export interface IncomeDoc {
   value: number;
   isRecurring: boolean;
   incomeDate: string;
+  recurrenceEndMonth?: string | null;
+  recurrenceGroupId?: string | null;
+  monthlyOverrides?: Record<string, IncomeMonthlyOverride>;
   createdAt: string;
   updatedAt: string;
 }
@@ -108,6 +167,11 @@ export interface InvestmentDoc {
   name: string;
   category: string;
   amount: number;
+  principalAmount?: number;
+  allocatedPrincipal?: number;
+  yieldAmount?: number;
+  lastYieldUpdateAt?: string | null;
+  yieldHistory?: YieldHistoryEntry[];
   investedDate: string;
   source: InvestmentSource;
   notes?: string | null;

@@ -22,6 +22,7 @@ import { DueRemindersService } from './due-reminders.service';
 import { ExpensesService } from './expenses.service';
 import { AckDueRemindersDto } from './dto/ack-due-reminders.dto';
 import { CreateExpenseDto } from './dto/create-expense.dto';
+import { CreateFoodExpensesBatchDto } from './dto/food-expenses.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
 import { PayExpensesBatchDto } from './dto/pay-expenses-batch.dto';
@@ -90,6 +91,14 @@ export class ExpensesController {
     return this.service.payBatch(req.user.userId, dto);
   }
 
+  @Post('food-allowance/batch')
+  createFoodExpensesBatch(
+    @Body() dto: CreateFoodExpensesBatchDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.service.createFoodExpensesBatch(req.user.userId, dto);
+  }
+
   @Patch(':id/pay')
   markAsPaid(
     @Param('id') id: string,
@@ -109,8 +118,13 @@ export class ExpensesController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
-    return this.service.remove(id, req.user.userId);
+  remove(
+    @Param('id') id: string,
+    @Request() req: AuthenticatedRequest,
+    @Query('scope') scope?: 'only_month' | 'from_month' | 'all' | 'all_installments',
+    @Query('month') month?: string,
+  ) {
+    return this.service.remove(id, req.user.userId, scope, month);
   }
 
   @Patch(':id')

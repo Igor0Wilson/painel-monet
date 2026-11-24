@@ -24,13 +24,16 @@ import { FirebaseRegisterDto } from './dto/firebase-register.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { GoogleCompleteDto } from './dto/google-complete.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
+import { SetSecurityPinDto, VerifySecurityPinDto } from './dto/security-pin.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { SecurityPinService } from './security-pin.service';
 
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly biometricService: BiometricService,
+    private readonly securityPinService: SecurityPinService,
   ) {}
 
   @Throttle({ default: { ttl: 60000, limit: 10 } })
@@ -133,6 +136,44 @@ export class AuthController {
   @Post('biometric/login/verify')
   async verifyBiometricLogin(@Body() dto: BiometricLoginVerifyDto) {
     const user = await this.biometricService.verifyLoginAssertion(dto);
+    return this.authService.issueJwtSession(user);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('security-pin/status')
+  async getSecurityPinStatus(@Request() req: AuthenticatedRequest) {
+    return this.securityPinService.getStatus(req.user.userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { ttl: 60000, limit: 10 } })
+  @Post('security-pin')
+  async setSecurityPin(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: SetSecurityPinDto,
+  ) {
+    return this.securityPinService.setPin(req.user.userId, dto.pin);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { ttl: 60000, limit: 15 } })
+  @Post('security-pin/device-token')
+  async issueSecurityPinDeviceToken(@Request() req: AuthenticatedRequest) {
+    return this.securityPinService.issueDeviceTokenForAuthenticatedUser(
+      req.user.userId,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('security-pin')
+  async removeSecurityPin(@Request() req: AuthenticatedRequest) {
+    return this.securityPinService.removePin(req.user.userId);
+  }
+
+  @Throttle({ default: { ttl: 60000, limit: 8 } })
+  @Post('security-pin/verify')
+  async verifySecurityPin(@Body() dto: VerifySecurityPinDto) {
+    const user = await this.securityPinService.verifyPinForLogin(dto);
     return this.authService.issueJwtSession(user);
   }
 }

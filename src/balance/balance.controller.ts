@@ -13,8 +13,11 @@ import {
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BalanceService } from './balance.service';
+import { BatchUpdateInvestmentsDto } from './dto/batch-update-investments.dto';
+import { CloseFoodMonthDto } from './dto/close-food-month.dto';
 import { CreateInvestmentItemDto } from './dto/create-investment-item.dto';
 import { UpdateEmergencyFundDto } from './dto/update-emergency-fund.dto';
+import { UpdateEmergencyYieldDto } from './dto/update-emergency-yield.dto';
 import { UpdateFoodAllowanceDto } from './dto/update-food-allowance.dto';
 import { UpdateInvestmentItemDto } from './dto/update-investment-item.dto';
 import { UpdateInvestmentsDto } from './dto/update-investments.dto';
@@ -51,6 +54,14 @@ export class BalanceController {
     );
   }
 
+  @Post('emergency-fund/yield')
+  applyEmergencyFundYield(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateEmergencyYieldDto,
+  ) {
+    return this.service.applyEmergencyFundYield(req.user.userId, dto);
+  }
+
   @Post('investments')
   updateInvestments(
     @Request() req: AuthenticatedRequest,
@@ -62,6 +73,14 @@ export class BalanceController {
       dto.fromAvailableBalance ?? true,
       dto.reclassifyAllocatedToExternal ?? false,
     );
+  }
+
+  @Post('investments/batch-update-balances')
+  batchUpdateInvestmentBalances(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: BatchUpdateInvestmentsDto,
+  ) {
+    return this.service.batchUpdateInvestmentBalances(req.user.userId, dto);
   }
 
   @Get('investments/items')
@@ -104,9 +123,18 @@ export class BalanceController {
   ) {
     return this.service.updateFoodAllowance(
       req.user.userId,
-      dto.amount,
+      dto.amount ?? 0,
       dto.creditDate,
       dto.isRecurring,
+      dto,
     );
+  }
+
+  @Post('food-allowance/close-month')
+  closeFoodAllowanceMonth(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: CloseFoodMonthDto,
+  ) {
+    return this.service.closeFoodAllowanceMonth(req.user.userId, dto);
   }
 }

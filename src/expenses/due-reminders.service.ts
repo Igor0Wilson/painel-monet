@@ -21,7 +21,9 @@ import {
   formatDateOnly,
   getBrazilTodayParts,
   getDaysInMonth,
+  getMonthKeyFromParts,
   parseDateOnly,
+  parseMonthKey,
 } from '../income/income.date-utils';
 
 export interface DueExpenseReminderItem {
@@ -87,6 +89,8 @@ export class DueRemindersService {
       const start = parseDateOnly(expense.dueDate);
       if (!start.year || !start.month || !start.day) return null;
       const startMonthIdx = start.year * 12 + (start.month - 1);
+      const parsedEnd = parseMonthKey(expense.recurrenceEndMonth);
+      const endMonthIdx = parsedEnd ? parsedEnd.monthIndex : Number.POSITIVE_INFINITY;
 
       const candidateMonths: { year: number; month: number }[] = [
         { year: today.year, month: today.month },
@@ -97,9 +101,13 @@ export class DueRemindersService {
 
       for (const candidate of candidateMonths) {
         const candidateMonthIdx = candidate.year * 12 + (candidate.month - 1);
-        if (candidateMonthIdx < startMonthIdx) continue;
+        if (candidateMonthIdx < startMonthIdx || candidateMonthIdx > endMonthIdx) continue;
+        const mKey = getMonthKeyFromParts(candidate);
+        const ov = expense.monthlyOverrides?.[mKey];
+        if (ov?.skipped || ov?.materializedExpenseId) continue;
+
         const clampedDay = Math.min(
-          start.day,
+          ov?.day ?? start.day,
           getDaysInMonth(candidate.year, candidate.month),
         );
         const occIso = formatDateOnly({

@@ -690,7 +690,25 @@ export class UsersService {
     const allocatedInvestments = Number(user.investments || 0);
     const externalInvestments = Number(user.externalInvestments || 0);
     const investments = allocatedInvestments + externalInvestments;
-    const foodAllowanceTotal = Number(user.foodAllowance || 0);
+    let foodAllowanceTotal = Number(user.foodAllowance || 0);
+    if (user.vaConfig || user.vrConfig) {
+      const evalBenefit = (cfg?: { enabled?: boolean; amount?: number; creditDate?: string; isRecurring?: boolean; recurrenceEndMonth?: string | null; monthlyOverrides?: Record<string, { amount?: number; creditDate?: string; skipped?: boolean }> } | null) =>
+        cfg?.enabled
+          ? evaluateIncomeCredit(
+              {
+                value: Number(cfg.amount || 0),
+                incomeDate: cfg.creditDate || user.createdAt?.slice(0, 10) || '2026-01-01',
+                isRecurring: Boolean(cfg.isRecurring),
+                recurrenceEndMonth: cfg.recurrenceEndMonth ?? null,
+                monthlyOverrides: cfg.monthlyOverrides ?? null,
+              },
+              today,
+            ).creditedAmount
+          : 0;
+      foodAllowanceTotal = Number(
+        (evalBenefit(user.vaConfig) + evalBenefit(user.vrConfig)).toFixed(2),
+      );
+    }
     const foodAllowanceRemaining = Math.max(
       0,
       Number((foodAllowanceTotal - totalFoodVoucherExpenses).toFixed(2)),

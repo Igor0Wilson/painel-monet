@@ -53,4 +53,10 @@ export class PayExpensesBatchDto {
     message: 'Informe os 4 últimos dígitos do cartão (apenas números).',
   })
   cardLast4?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, {
+    message: 'Informe o mês de referência no formato AAAA-MM.',
+  })
+  occurrenceMonth?: string;
 }

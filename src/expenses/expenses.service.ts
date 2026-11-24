@@ -20,6 +20,7 @@ import {
   AccountTypeDoc,
   COLLECTIONS,
   ExpenseDoc,
+  ExpenseMonthlyOverride,
   ExpensePaymentMethod,
   ExpensePaymentPart,
 } from '../firebase/firebase.types';
@@ -28,10 +29,14 @@ import {
   compareDateParts,
   formatDateOnly,
   getDaysInMonth,
+  getMonthKeyFromParts,
   getTodayParts,
   parseDateOnly,
+  parseMonthKey,
+  shiftMonthKey,
 } from '../income/income.date-utils';
 import { CreateExpenseDto } from './dto/create-expense.dto';
+import { CreateFoodExpensesBatchDto } from './dto/food-expenses.dto';
 import { GenerateCardInvoiceDto } from './dto/generate-card-invoice.dto';
 import { PayCreditCardInvoiceDto } from './dto/pay-credit-card-invoice.dto';
 import { PayExpenseDto } from './dto/pay-expense.dto';
@@ -94,8 +99,26 @@ export class ExpensesService {
     const dueParts = parseDateOnly(expense.dueDate);
 
     if (expense.isRecurring) {
+      const startMonthIdx = dueParts.year * 12 + (dueParts.month - 1);
+      const todayMonthIdx = today.year * 12 + (today.month - 1);
+      if (startMonthIdx > todayMonthIdx) {
+        return 'pendente';
+      }
+
+      const parsedEnd = parseMonthKey(expense.recurrenceEndMonth);
+      if (parsedEnd && todayMonthIdx > parsedEnd.monthIndex) {
+        return 'pendente';
+      }
+
+      const todayKey = getMonthKeyFromParts(today);
+      const ov = expense.monthlyOverrides?.[todayKey];
+      if (ov?.skipped || ov?.materializedExpenseId) {
+        return 'pendente';
+      }
+
+      const targetDay = ov?.day ?? dueParts.day;
       const clampedDay = Math.min(
-        dueParts.day,
+        targetDay,
         getDaysInMonth(today.year, today.month),
       );
       const currentMonthDue = {
@@ -109,6 +132,114 @@ export class ExpensesService {
     }
 
     return compareDateParts(dueParts, today) < 0 ? 'em_atraso' : 'pendente';
+  }
+
+  private async materializeRecurringOccurrence(
+    expense: ExpenseDoc,
+    occMonth: string,
+    userId: string,
+  ): Promise<ExpenseDoc> {
+    const parsedMonth = parseMonthKey(occMonth);
+    if (!parsedMonth) {
+      throw new BadRequestException('Informe um mês válido no formato AAAA-MM.');
+    }
+
+    const startParts = parseDateOnly(expense.dueDate);
+    const startMonth = getMonthKeyFromParts(startParts);
+    if (occMonth < startMonth) {
+      throw new BadRequestException(
+        'O mês selecionado é anterior ao início desta despesa recorrente.',
+      );
+    }
+    if (expense.recurrenceEndMonth && occMonth > expense.recurrenceEndMonth) {
+      throw new BadRequestException(
+        'O mês selecionado está após o encerramento desta recorrência.',
+      );
+    }
+
+    const existingOv = expense.monthlyOverrides?.[occMonth];
+    if (existingOv?.materializedExpenseId) {
+      const existingMat = await this.firebase.findById<ExpenseDoc>(
+        COLLECTIONS.EXPENSES,
+        existingOv.materializedExpenseId,
+      );
+      if (existingMat && existingMat.userId === userId) {
+        return existingMat;
+      }
+    }
+
+    const allUserExpenses = await this.firebase.findByField<ExpenseDoc>(
+      COLLECTIONS.EXPENSES,
+      'userId',
+      userId,
+    );
+    const matched = allUserExpenses.find(
+      (e) =>
+        e.recurrenceParentId === expense.id && e.occurrenceMonth === occMonth,
+    );
+    if (matched) {
+      return matched;
+    }
+
+    const now = new Date().toISOString();
+    const clampedDay = Math.min(
+      existingOv?.day ?? startParts.day,
+      getDaysInMonth(parsedMonth.year, parsedMonth.month),
+    );
+    const occDate = formatDateOnly({
+      year: parsedMonth.year,
+      month: parsedMonth.month,
+      day: clampedDay,
+    });
+
+    const materialized: ExpenseDoc = {
+      id: uuidv4(),
+      userId,
+      accountTypeId: existingOv?.accountTypeId ?? expense.accountTypeId,
+      name: existingOv?.name ?? expense.name,
+      value:
+        existingOv?.value !== undefined
+          ? Number(existingOv.value)
+          : Number(expense.value),
+      dueDate: occDate,
+      isRecurring: false,
+      recurrenceParentId: expense.id,
+      occurrenceMonth: occMonth,
+      recurrenceGroupId: expense.recurrenceGroupId ?? null,
+      isInstallment: false,
+      installmentCount: null,
+      installmentNumber: null,
+      parentExpenseId: null,
+      isPaid: false,
+      paidAmount: 0,
+      paidAt: null,
+      payments: [],
+      isCreditCard: Boolean(expense.isCreditCard),
+      paymentMethod: null,
+      pixKey: expense.pixKey ?? null,
+      isAutoDebit: Boolean(expense.isAutoDebit),
+      cardBank: expense.cardBank ?? null,
+      cardLast4: expense.cardLast4 ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await this.firebase.setDoc(COLLECTIONS.EXPENSES, materialized);
+
+    const nextOverrides: Record<string, ExpenseMonthlyOverride> = {
+      ...(expense.monthlyOverrides || {}),
+      [occMonth]: {
+        ...(existingOv || {}),
+        skipped: false,
+        materializedExpenseId: materialized.id,
+      },
+    };
+    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
+      monthlyOverrides: nextOverrides,
+      updatedAt: now,
+    });
+
+    return materialized;
   }
 
   private splitValueInCents(totalValue: number, count: number): number[] {
@@ -616,12 +747,21 @@ export class ExpensesService {
     userId: string,
     dto?: PayExpenseDto,
   ): Promise<ExpenseWithStatus> {
-    const expense = await this.firebase.findById<ExpenseDoc>(
+    let expense = await this.firebase.findById<ExpenseDoc>(
       COLLECTIONS.EXPENSES,
       id,
     );
     if (!expense || expense.userId !== userId) {
       throw new NotFoundException('Despesa não encontrada');
+    }
+
+    if (expense.isRecurring) {
+      const occMonth = dto?.occurrenceMonth || getMonthKeyFromParts(getTodayParts());
+      expense = await this.materializeRecurringOccurrence(
+        expense,
+        occMonth,
+        userId,
+      );
     }
 
     const summary = this.resolveExpensePaymentSummary(expense);
@@ -687,7 +827,7 @@ export class ExpensesService {
         ? Number(Math.max(0, summary.totalValue - finalPaidAmount).toFixed(2))
         : 0;
 
-      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
         isPaid: nextIsPaid,
         paidAmount: finalPaidAmount,
         discountAmount,
@@ -753,7 +893,7 @@ export class ExpensesService {
         ? normalizeCardLast4(dto.cardLast4)
         : expense.cardLast4 ?? null;
 
-    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+    await this.firebase.updateDoc(COLLECTIONS.EXPENSES, expense.id, {
       isPaid: true,
       paidAmount: finalCreditPaidAmount,
       discountAmount: creditDiscountAmount,
@@ -1177,11 +1317,16 @@ export class ExpensesService {
     const paidDate = dto.paidAt || formatDateOnly(getTodayParts());
     const overrideBank = normalizeOptionalText(dto.cardBank);
     const overrideLast4 = normalizeCardLast4(dto.cardLast4);
+    const occMonth = dto.occurrenceMonth || getMonthKeyFromParts(getTodayParts());
     let totalPaid = 0;
     const paidIds: string[] = [];
 
-    for (const expense of targets) {
+    for (const rawExpense of targets) {
+      const expense = rawExpense.isRecurring
+        ? await this.materializeRecurringOccurrence(rawExpense, occMonth, userId)
+        : rawExpense;
       const summary = this.resolveExpensePaymentSummary(expense);
+      if (summary.isPaid) continue;
       const remaining =
         summary.remainingAmount > 0 ? summary.remainingAmount : Number(expense.value);
       const resolvedCardBank =
@@ -1253,13 +1398,237 @@ export class ExpensesService {
     };
   }
 
-  async remove(id: string, userId: string): Promise<void> {
+  async createFoodExpensesBatch(
+    userId: string,
+    dto: CreateFoodExpensesBatchDto,
+  ): Promise<ExpenseWithStatus[]> {
+    const accountTypes = await this.firebase.findByField<AccountTypeDoc>(
+      COLLECTIONS.ACCOUNT_TYPES,
+      'userId',
+      userId,
+    );
+    const typesById = new Map(accountTypes.map((t) => [t.id, t]));
+
+    let defaultFoodCat = accountTypes.find(
+      (t) => normalizeOfficialCategory(t.name) === 'Alimentação',
+    );
+    if (!defaultFoodCat) {
+      defaultFoodCat = accountTypes.find(
+        (t) => normalizeOfficialCategory(t.name) === 'FastFood',
+      );
+    }
+    if (!defaultFoodCat) {
+      const nowCat = new Date().toISOString();
+      defaultFoodCat = {
+        id: uuidv4(),
+        name: 'Alimentação',
+        userId,
+        createdAt: nowCat,
+        updatedAt: nowCat,
+      };
+      await this.firebase.setDoc(COLLECTIONS.ACCOUNT_TYPES, defaultFoodCat);
+      typesById.set(defaultFoodCat.id, defaultFoodCat);
+    }
+
+    const now = new Date().toISOString();
+    const createdList: ExpenseWithStatus[] = [];
+
+    for (const item of dto.items) {
+      const chosenCatId = item.accountTypeId?.trim();
+      if (chosenCatId) {
+        const cat = typesById.get(chosenCatId);
+        if (!cat || cat.userId !== userId) {
+          throw new ForbiddenException(
+            'Categoria não pertence ao usuário autenticado.',
+          );
+        }
+      }
+      const resolvedCat = (chosenCatId && typesById.get(chosenCatId)) || defaultFoodCat;
+      const amount = Number(Number(item.amount).toFixed(2));
+      const cleanDate = String(item.date).split('T')[0];
+
+      const doc: ExpenseDoc = {
+        id: uuidv4(),
+        userId,
+        accountTypeId: resolvedCat.id,
+        name: item.name.trim(),
+        value: amount,
+        dueDate: cleanDate,
+        isRecurring: false,
+        isInstallment: false,
+        installmentCount: null,
+        installmentNumber: null,
+        parentExpenseId: null,
+        isPaid: true,
+        paidAmount: amount,
+        discountAmount: 0,
+        isEarlyPayment: false,
+        paidAt: cleanDate,
+        payments: [
+          {
+            id: uuidv4(),
+            amount,
+            paidAt: cleanDate,
+            paymentMethod: item.paymentMethod,
+            createdAt: now,
+          },
+        ],
+        isCreditCard: false,
+        paymentMethod: item.paymentMethod,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await this.firebase.setDoc(COLLECTIONS.EXPENSES, doc);
+      createdList.push(
+        this.toExpenseWithStatus(doc, {
+          accountType: {
+            id: resolvedCat.id,
+            name: normalizeOfficialCategory(resolvedCat.name),
+          },
+          ownerId: userId,
+          isOwn: true,
+        }),
+      );
+    }
+
+    await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+    void this.auditService?.log({
+      actorUserId: userId,
+      action: 'expenses.food_batch_create',
+      resource: 'expenses',
+      outcome: 'ALLOW',
+      details: `count=${createdList.length}`,
+    });
+
+    return createdList;
+  }
+
+  async remove(
+    id: string,
+    userId: string,
+    scope: 'only_month' | 'from_month' | 'all' | 'all_installments' = 'all',
+    month?: string,
+  ): Promise<void> {
     const expense = await this.firebase.findById<ExpenseDoc>(
       COLLECTIONS.EXPENSES,
       id,
     );
     if (!expense || expense.userId !== userId) {
       throw new NotFoundException('Despesa não encontrada');
+    }
+
+    const now = new Date().toISOString();
+
+    if (expense.isRecurring && (scope === 'only_month' || scope === 'from_month')) {
+      const targetMonth = month || getMonthKeyFromParts(getTodayParts());
+      const parsedTarget = parseMonthKey(targetMonth);
+      if (!parsedTarget) {
+        throw new BadRequestException('Informe um mês válido no formato AAAA-MM.');
+      }
+      const startParts = parseDateOnly(expense.dueDate);
+      const startMonth = getMonthKeyFromParts(startParts);
+
+      if (scope === 'only_month') {
+        if (targetMonth < startMonth) {
+          throw new BadRequestException(
+            'O mês selecionado é anterior ao início desta despesa recorrente.',
+          );
+        }
+        const existingMatId = expense.monthlyOverrides?.[targetMonth]?.materializedExpenseId;
+        if (existingMatId) {
+          const mat = await this.firebase.findById<ExpenseDoc>(
+            COLLECTIONS.EXPENSES,
+            existingMatId,
+          );
+          if (mat && mat.userId === userId) {
+            if (mat.receiptPublicId) {
+              await this.cloudinaryService?.deleteImage(mat.receiptPublicId);
+            }
+            await this.firebase.deleteDoc(COLLECTIONS.EXPENSES, mat.id);
+          }
+        }
+        const nextOverrides: Record<string, ExpenseMonthlyOverride> = {
+          ...(expense.monthlyOverrides || {}),
+          [targetMonth]: {
+            ...(expense.monthlyOverrides?.[targetMonth] || {}),
+            materializedExpenseId: undefined,
+            skipped: true,
+          },
+        };
+        await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+          monthlyOverrides: nextOverrides,
+          updatedAt: now,
+        });
+        await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+        return;
+      }
+
+      if (targetMonth > startMonth) {
+        const endMonth = shiftMonthKey(targetMonth, -1);
+        const prunedOverrides: Record<string, ExpenseMonthlyOverride> = {};
+        Object.entries(expense.monthlyOverrides || {}).forEach(([mKey, ov]) => {
+          if (mKey <= endMonth) {
+            prunedOverrides[mKey] = ov;
+          }
+        });
+        await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+          recurrenceEndMonth: endMonth,
+          monthlyOverrides: prunedOverrides,
+          updatedAt: now,
+        });
+        await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+        return;
+      }
+    }
+
+    if (scope === 'all_installments' && (expense.isInstallment || expense.parentExpenseId)) {
+      const rootId = expense.parentExpenseId || expense.id;
+      const allUserExpenses = await this.firebase.findByField<ExpenseDoc>(
+        COLLECTIONS.EXPENSES,
+        'userId',
+        userId,
+      );
+      const groupMembers = allUserExpenses.filter(
+        (e) => e.id === rootId || e.parentExpenseId === rootId,
+      );
+      for (const member of groupMembers) {
+        if (member.receiptPublicId) {
+          await this.cloudinaryService?.deleteImage(member.receiptPublicId);
+        }
+        await this.firebase.deleteDoc(COLLECTIONS.EXPENSES, member.id);
+      }
+      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+      void this.auditService?.log({
+        actorUserId: userId,
+        action: 'expenses.delete_group',
+        resource: 'expenses',
+        resourceId: rootId,
+        outcome: 'ALLOW',
+      });
+      return;
+    }
+
+    if (expense.recurrenceParentId && expense.occurrenceMonth) {
+      const parent = await this.firebase.findById<ExpenseDoc>(
+        COLLECTIONS.EXPENSES,
+        expense.recurrenceParentId,
+      );
+      if (parent && parent.userId === userId) {
+        const existingOv = parent.monthlyOverrides?.[expense.occurrenceMonth] || {};
+        const nextOverrides: Record<string, ExpenseMonthlyOverride> = {
+          ...(parent.monthlyOverrides || {}),
+          [expense.occurrenceMonth]: {
+            ...existingOv,
+            materializedExpenseId: undefined,
+            skipped: scope === 'only_month' ? true : existingOv.skipped,
+          },
+        };
+        await this.firebase.updateDoc(COLLECTIONS.EXPENSES, parent.id, {
+          monthlyOverrides: nextOverrides,
+          updatedAt: now,
+        });
+      }
     }
 
     const childExpenses = await this.firebase.findByField<ExpenseDoc>(
@@ -1447,10 +1816,6 @@ export class ExpensesService {
       throw new NotFoundException('Despesa não encontrada');
     }
 
-    const updateData: Partial<ExpenseDoc> = {
-      updatedAt: new Date().toISOString(),
-    };
-    if (dto.name !== undefined) updateData.name = dto.name.trim();
     if (dto.accountTypeId !== undefined) {
       const targetCategory = await this.firebase.findById<AccountTypeDoc>(
         COLLECTIONS.ACCOUNT_TYPES,
@@ -1461,6 +1826,177 @@ export class ExpensesService {
           'Categoria não pertence ao usuário autenticado.',
         );
       }
+    }
+
+    const now = new Date().toISOString();
+    const editScope = dto.editScope || 'all';
+    const targetMonth = dto.targetMonth || getMonthKeyFromParts(getTodayParts());
+    const startParts = parseDateOnly(expense.dueDate);
+    const startMonth = getMonthKeyFromParts(startParts);
+
+    if (expense.isRecurring && editScope === 'only_month') {
+      const parsedTarget = parseMonthKey(targetMonth);
+      if (!parsedTarget) {
+        throw new BadRequestException('Informe um mês válido no formato AAAA-MM.');
+      }
+      if (targetMonth < startMonth) {
+        throw new BadRequestException(
+          'Não é possível editar um mês anterior ao início desta despesa.',
+        );
+      }
+      if (expense.recurrenceEndMonth && targetMonth > expense.recurrenceEndMonth) {
+        throw new BadRequestException(
+          'Este mês está após o encerramento desta recorrência.',
+        );
+      }
+
+      const existingOv = expense.monthlyOverrides?.[targetMonth] || {};
+      const nextOverride: ExpenseMonthlyOverride = {
+        ...existingOv,
+        skipped: false,
+      };
+      if (dto.name !== undefined) nextOverride.name = dto.name.trim();
+      if (dto.value !== undefined) nextOverride.value = Number(dto.value);
+      if (dto.accountTypeId !== undefined) {
+        nextOverride.accountTypeId = dto.accountTypeId;
+      }
+      if (dto.dueDate !== undefined) {
+        const parsedDue = parseDateOnly(dto.dueDate);
+        if (parsedDue.day) nextOverride.day = parsedDue.day;
+      }
+
+      const nextOverrides: Record<string, ExpenseMonthlyOverride> = {
+        ...(expense.monthlyOverrides || {}),
+        [targetMonth]: nextOverride,
+      };
+
+      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+        monthlyOverrides: nextOverrides,
+        updatedAt: now,
+      });
+
+      if (existingOv.materializedExpenseId) {
+        const mat = await this.firebase.findById<ExpenseDoc>(
+          COLLECTIONS.EXPENSES,
+          existingOv.materializedExpenseId,
+        );
+        if (mat && mat.userId === userId) {
+          const matPatch: Partial<ExpenseDoc> = { updatedAt: now };
+          if (dto.name !== undefined) matPatch.name = dto.name.trim();
+          if (dto.value !== undefined) matPatch.value = Number(dto.value);
+          if (dto.accountTypeId !== undefined) {
+            matPatch.accountTypeId = dto.accountTypeId;
+          }
+          if (dto.dueDate !== undefined) matPatch.dueDate = dto.dueDate;
+          await this.firebase.updateDoc(COLLECTIONS.EXPENSES, mat.id, matPatch);
+        }
+      }
+
+      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+      return this.toExpenseWithStatus({
+        ...expense,
+        monthlyOverrides: nextOverrides,
+        updatedAt: now,
+      });
+    }
+
+    if (expense.isRecurring && editScope === 'from_month' && targetMonth > startMonth) {
+      const parsedTarget = parseMonthKey(targetMonth);
+      if (!parsedTarget) {
+        throw new BadRequestException('Informe um mês válido no formato AAAA-MM.');
+      }
+
+      const prevEndMonth = shiftMonthKey(targetMonth, -1);
+      const pastOverrides: Record<string, ExpenseMonthlyOverride> = {};
+      const futureOverrides: Record<string, ExpenseMonthlyOverride> = {};
+
+      Object.entries(expense.monthlyOverrides || {}).forEach(([mKey, ov]) => {
+        if (mKey <= prevEndMonth) {
+          pastOverrides[mKey] = ov;
+        } else if (mKey > targetMonth) {
+          futureOverrides[mKey] = ov;
+        }
+      });
+
+      const effectiveEndForOld =
+        expense.recurrenceEndMonth && expense.recurrenceEndMonth < prevEndMonth
+          ? expense.recurrenceEndMonth
+          : prevEndMonth;
+      const groupId = expense.recurrenceGroupId || expense.id;
+
+      await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, {
+        recurrenceEndMonth: effectiveEndForOld,
+        recurrenceGroupId: groupId,
+        monthlyOverrides: pastOverrides,
+        updatedAt: now,
+      });
+
+      const dayFromDto = dto.dueDate ? parseDateOnly(dto.dueDate).day : startParts.day;
+      const clampedDay = Math.min(
+        dayFromDto || startParts.day,
+        getDaysInMonth(parsedTarget.year, parsedTarget.month),
+      );
+      const newDueDate = formatDateOnly({
+        year: parsedTarget.year,
+        month: parsedTarget.month,
+        day: clampedDay,
+      });
+
+      const nextSeries: ExpenseDoc = {
+        id: uuidv4(),
+        userId,
+        accountTypeId: dto.accountTypeId ?? expense.accountTypeId,
+        name: dto.name !== undefined ? dto.name.trim() : expense.name,
+        value: dto.value !== undefined ? Number(dto.value) : Number(expense.value),
+        dueDate: newDueDate,
+        isRecurring:
+          dto.isRecurring !== undefined ? Boolean(dto.isRecurring) : true,
+        recurrenceEndMonth: expense.recurrenceEndMonth ?? null,
+        recurrenceGroupId: groupId,
+        monthlyOverrides: futureOverrides,
+        isInstallment: false,
+        installmentCount: null,
+        installmentNumber: null,
+        parentExpenseId: null,
+        isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        payments: [],
+        isCreditCard:
+          dto.isCreditCard !== undefined
+            ? Boolean(dto.isCreditCard)
+            : Boolean(expense.isCreditCard),
+        paymentMethod: null,
+        pixKey:
+          dto.pixKey !== undefined
+            ? normalizeOptionalText(dto.pixKey)
+            : expense.pixKey ?? null,
+        isAutoDebit:
+          dto.isAutoDebit !== undefined
+            ? Boolean(dto.isAutoDebit)
+            : Boolean(expense.isAutoDebit),
+        cardBank:
+          dto.cardBank !== undefined
+            ? normalizeOptionalText(dto.cardBank)
+            : expense.cardBank ?? null,
+        cardLast4:
+          dto.cardLast4 !== undefined
+            ? normalizeCardLast4(dto.cardLast4)
+            : expense.cardLast4 ?? null,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await this.firebase.setDoc(COLLECTIONS.EXPENSES, nextSeries);
+      await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
+      return this.toExpenseWithStatus(nextSeries);
+    }
+
+    const updateData: Partial<ExpenseDoc> = {
+      updatedAt: now,
+    };
+    if (dto.name !== undefined) updateData.name = dto.name.trim();
+    if (dto.accountTypeId !== undefined) {
       updateData.accountTypeId = dto.accountTypeId;
     }
     if (dto.value !== undefined) updateData.value = Number(dto.value);
@@ -1501,7 +2037,7 @@ export class ExpensesService {
               amount: remaining,
               paidAt: payDate,
               paymentMethod: method,
-              createdAt: new Date().toISOString(),
+              createdAt: now,
             },
           ];
         }
@@ -1541,6 +2077,58 @@ export class ExpensesService {
     }
 
     await this.firebase.updateDoc(COLLECTIONS.EXPENSES, id, updateData);
+
+    const cardMetaChanged =
+      dto.cardBank !== undefined ||
+      dto.cardLast4 !== undefined ||
+      dto.isAutoDebit !== undefined ||
+      dto.pixKey !== undefined;
+
+    if (
+      (expense.isInstallment || expense.parentExpenseId) &&
+      (editScope === 'all_installments' || (cardMetaChanged && editScope !== 'only_month'))
+    ) {
+      const rootId = expense.parentExpenseId || expense.id;
+      const allUserExpenses = await this.firebase.findByField<ExpenseDoc>(
+        COLLECTIONS.EXPENSES,
+        'userId',
+        userId,
+      );
+      const siblings = allUserExpenses.filter(
+        (item) =>
+          item.id !== expense.id &&
+          (item.id === rootId || item.parentExpenseId === rootId),
+      );
+      const cleanBaseName =
+        dto.name !== undefined
+          ? dto.name.replace(/\s*\(\d+\/\d+\)\s*$/, '').trim()
+          : null;
+
+      for (const sib of siblings) {
+        const sibPatch: Partial<ExpenseDoc> = { updatedAt: now };
+        if (dto.cardBank !== undefined) sibPatch.cardBank = updateData.cardBank;
+        if (dto.cardLast4 !== undefined) sibPatch.cardLast4 = updateData.cardLast4;
+        if (dto.isAutoDebit !== undefined) sibPatch.isAutoDebit = updateData.isAutoDebit;
+        if (dto.pixKey !== undefined) sibPatch.pixKey = updateData.pixKey;
+
+        if (editScope === 'all_installments') {
+          if (dto.accountTypeId !== undefined) sibPatch.accountTypeId = dto.accountTypeId;
+          if (dto.isCreditCard !== undefined) sibPatch.isCreditCard = updateData.isCreditCard;
+          if (cleanBaseName !== null) {
+            const suffix =
+              sib.installmentNumber && sib.installmentCount
+                ? ` (${sib.installmentNumber}/${sib.installmentCount})`
+                : '';
+            sibPatch.name = `${cleanBaseName}${suffix}`;
+          }
+          if (dto.value !== undefined && !sib.isPaid) {
+            sibPatch.value = Number(dto.value);
+          }
+        }
+        await this.firebase.updateDoc(COLLECTIONS.EXPENSES, sib.id, sibPatch);
+      }
+    }
+
     await this.familyService.notifyFamilyDataChanged(userId, 'data_updated');
 
     const updated = { ...expense, ...updateData };

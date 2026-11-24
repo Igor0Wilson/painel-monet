@@ -92,12 +92,17 @@ export function normalizeOfficialCategory(rawName?: string | null): string {
     norm.includes('movel') ||
     norm.includes('eletron') ||
     norm.includes('eletro') ||
+    norm.includes('electronics') ||
+    norm.includes('furniture') ||
+    norm.includes('muebles') ||
+    norm.includes('informatica') ||
     norm.includes('notebook') ||
     norm.includes('computador') ||
     norm.includes('celular') ||
     norm.includes('geladeira') ||
     norm.includes('sofa') ||
     norm.includes('televisao') ||
+    norm.includes('tv') ||
     norm.includes('monitor')
   ) {
     return 'Móveis e Eletrônicos';
@@ -143,6 +148,18 @@ export class AccountTypesService {
           updatedAt: now,
         });
         byOfficialName.set('FastFood', { ...item, name: 'FastFood' });
+      } else if (
+        normalizeOfficialCategory(item.name) === 'Móveis e Eletrônicos' &&
+        !byOfficialName.has('Móveis e Eletrônicos')
+      ) {
+        await this.firebase.updateDoc(COLLECTIONS.ACCOUNT_TYPES, item.id, {
+          name: 'Móveis e Eletrônicos',
+          updatedAt: now,
+        });
+        byOfficialName.set('Móveis e Eletrônicos', {
+          ...item,
+          name: 'Móveis e Eletrônicos',
+        });
       }
     }
 

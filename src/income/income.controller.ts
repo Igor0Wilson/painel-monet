@@ -32,8 +32,13 @@ export class IncomeController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
-    return this.service.remove(id, req.user.userId);
+  remove(
+    @Param('id') id: string,
+    @Request() req: AuthenticatedRequest,
+    @Query('scope') scope?: 'only_month' | 'from_month' | 'all',
+    @Query('month') month?: string,
+  ) {
+    return this.service.remove(id, req.user.userId, scope, month);
   }
 
   @Patch(':id')

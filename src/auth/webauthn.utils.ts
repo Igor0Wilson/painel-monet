@@ -97,12 +97,18 @@ export function safeEqualStrings(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+const VERCEL_PROJECT_ORIGIN_RE =
+  /^https:\/\/painel-monet-front(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+
 export function isOriginAllowedForWebAuthn(
   origin: string,
   allowedOrigins: string[],
 ): boolean {
   try {
     const parsedOrigin = new URL(origin).origin.toLowerCase();
+    if (VERCEL_PROJECT_ORIGIN_RE.test(parsedOrigin)) {
+      return true;
+    }
     return allowedOrigins.some((allowed) => {
       try {
         return new URL(allowed).origin.toLowerCase() === parsedOrigin;
@@ -139,6 +145,28 @@ export function coseKeyMapToSpkiPem(coseMap: Map<unknown, unknown>): string {
         crv: 'P-256',
         x: xRaw.toString('base64url'),
         y: yRaw.toString('base64url'),
+      },
+      format: 'jwk',
+    });
+    return pubKey.export({ type: 'spki', format: 'pem' }).toString();
+  }
+
+  // RSA RS256 (Windows Hello / Android TPM fallback)
+  if (kty === 3 && alg === -257) {
+    const nRaw = coseMap.get(-1);
+    const eRaw = coseMap.get(-2);
+    if (
+      !Buffer.isBuffer(nRaw) ||
+      !Buffer.isBuffer(eRaw) ||
+      nRaw.length < 128
+    ) {
+      throw new Error('Chave WebAuthn RSA inválida');
+    }
+    const pubKey = createPublicKey({
+      key: {
+        kty: 'RSA',
+        n: nRaw.toString('base64url'),
+        e: eRaw.toString('base64url'),
       },
       format: 'jwk',
     });
@@ -308,8 +336,9 @@ export function verifyWebAuthnAssertionPayload(params: {
 
   const newSignCount = authData.readUInt32BE(33);
   if (
-    (params.storedSignCount > 0 || newSignCount > 0) &&
-    newSignCount <= params.storedSignCount
+    params.storedSignCount > 0 &&
+    newSignCount > 0 &&
+    newSignCount < params.storedSignCount
   ) {
     throw new Error('Contador WebAuthn inválido (possível replay detectado)');
   }
